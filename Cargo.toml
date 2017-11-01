@@ -1,0 +1,13 @@
+[package]
+name = "redox_users"
+version = "0.1.0"
+authors = ["Jose Narvaez <goyox86@gmail.com>"]
+description = "A Rust library to access Redox users and groups functionality"
+license = "MIT"
+repository = "https://github.com/redox-os/users"
+documentation = "https://docs.rs/redox_users"
+
+[dependencies]
+argon2rs = { version = "0.2", default-features = false }
+extra = { git = "https://github.com/redox-os/libextra.git" }
+redox_syscall = "0.1"
