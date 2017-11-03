@@ -1,6 +1,6 @@
 # users
 
-API for accessing users and groups functionality in Redox.
+Redox OS APIs for accessing users and groups information.
 
 High level APIs for things like:
 
