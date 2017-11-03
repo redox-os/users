@@ -17,7 +17,7 @@ const GROUP_FILE: &'static str = "/etc/group";
 /// Currently maps to an entry in the '/etc/passwd' file
 #[derive(Clone)]
 pub struct User {
-    pub user: String,   // UNIX username
+    pub user: String,   // username
     pub hash: String,   // Hashed password
     pub uid: u32,       // User id
     pub gid: u32,       // Group id
@@ -77,8 +77,8 @@ impl User {
 /// Currently maps to an '/etc/group' file entry
 #[derive(Clone)]
 pub struct Group {
-    pub group: String,  // UNIX group name
-    pub gid: u32,       // UNIX unique group id
+    pub group: String,  // Group name
+    pub gid: u32,       // Unique group id
     pub users: String,  // Comma separated list of group members
 }
 
