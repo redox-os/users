@@ -34,4 +34,4 @@ then import it in your main file:
 extern crate rust_users;
 ```
 
-`rust_users` is now ready to roll!
+And `rust_users` is now ready to roll!
