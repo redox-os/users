@@ -24,7 +24,7 @@ Make sure you have Rust nightly.
 Add `rust_users` to `Cargo.toml`:
 
 ```toml
-[dependencies.ralloc]
+[dependencies.rust_users]
 git = "https://github.com/redox-os/users.git"
 ```
 
