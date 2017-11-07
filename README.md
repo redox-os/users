@@ -2,7 +2,7 @@
 
 Redox OS APIs for accessing users and groups information.
 
-High level APIs for things like:
+High level APIs for:
 
 - Getting the current process effective user ID.
 - Getting the current process user ID.
@@ -13,7 +13,7 @@ High level APIs for things like:
 - Getting the user information for a given username.
 - Getting a group information for a given group name.
 
-We recommend to user these APIs instead of directly manipulating
+We recommend to use these APIs instead of directly manipulating the
 `/etc/group` and `etc/passwd` as this is an implementation detail and
 might change in the future.
 
