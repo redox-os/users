@@ -61,13 +61,13 @@ impl User {
         Ok(entries)
     }
 
-    pub fn encode(password: &str, salt: &str) -> String {
+    pub fn encode_passwd(password: &str, salt: &str) -> String {
         let a2 = Argon2::new(10, 1, 4096, Variant::Argon2i).unwrap();
         let e = Encoded::new(a2, password.as_bytes(), salt.as_bytes(), &[], &[]);
         String::from_utf8(e.to_u8()).unwrap()
     }
 
-    pub fn verify(&self, password: &str) -> bool {
+    pub fn verify_passwd(&self, password: &str) -> bool {
         let e = Encoded::from_u8(self.hash.as_bytes()).unwrap();
         e.verify(password.as_bytes())
     }
@@ -121,7 +121,7 @@ impl Group {
 /// Basic usage:
 ///
 /// ```
-/// let euid = get_euid(&mut stderr);
+/// let euid = get_euid();
 ///
 /// ```
 pub fn get_euid() -> usize {
@@ -145,7 +145,7 @@ pub fn get_euid() -> usize {
 /// Basic usage:
 ///
 /// ```
-/// let uid = get_uid(&mut stderr);
+/// let uid = get_uid();
 ///
 /// ```
 pub fn get_uid() -> usize {
@@ -169,7 +169,7 @@ pub fn get_uid() -> usize {
 /// Basic usage:
 ///
 /// ```
-/// let egid = get_egid(&mut stderr);
+/// let egid = get_egid();
 ///
 /// ```
 pub fn get_egid() -> usize {
@@ -193,7 +193,7 @@ pub fn get_egid() -> usize {
 /// Basic usage:
 ///
 /// ```
-/// let gid = get_gid(&mut stderr);
+/// let gid = get_gid();
 ///
 /// ```
 pub fn get_gid() -> usize {
@@ -206,11 +206,12 @@ pub fn get_gid() -> usize {
     }
 }
 
-/// Gets the UNIX User file entry representing a user for a given user id.
+/// Gets the User representing given user ID aborting the caller on error.
 ///
-/// This function will read '/etc/passwd' looking for an entry for the provided user ID,
-/// returning a `User` struct representing that user if found and `None` otherwise.
-/// In case of an error it will log message to `stderr` and then will the caller process
+/// This function will read the users database (currently '/etc/passwd')
+/// returning a `User` struct representing the user who's UID matches and
+/// `None` otherwise. In case of an error it will log message to `stderr`
+/// and then will exit the caller process an non-zero status code.
 /// with an non-zero exit code.
 ///
 /// # Examples
@@ -218,10 +219,10 @@ pub fn get_gid() -> usize {
 /// Basic usage:
 ///
 /// ```
-/// let user = get_user_by_id(1, &mut stderr).unwrap();
+/// let user = get_user_by_id(1).unwrap();
 ///
 /// ```
-pub fn get_user_by_uid(uid: usize) -> Option<User> {
+pub fn get_user_by_id(uid: usize) -> Option<User> {
     let mut stderr = io::stderr();
 
     let mut user_string = String::new();
@@ -229,25 +230,27 @@ pub fn get_user_by_uid(uid: usize) -> Option<User> {
     file.read_to_string(&mut user_string).try(&mut stderr);
 
     let passwd_file_entries = User::parse_file(&user_string).unwrap();
-    
+
     passwd_file_entries.iter()
         .find(|user| user.uid as usize == uid)
         .cloned()
 }
 
-/// Gets the UNIX User file entry representing a user for a given user id.
+/// Gets the User representing a user for a given username aborting the
+/// caller on error.
 ///
-/// This function will read '/etc/passwd' looking for an entry for the provided user ID,
-/// returning a `User` struct representing that user if found and `None` otherwise.
-/// In case of an error it will log message to `stderr` and then will the caller process
-/// with an non-zero exit code.
+/// This function will read the users database (currently '/etc/passwd')
+/// returning a `User` struct representing the user who's username
+/// matches and `None` otherwise. In case of an error it will log message
+/// to `stderr` and then will exit the caller process an non-zero status
+/// code.
 ///
 /// # Examples
 ///
 /// Basic usage:
 ///
 /// ```
-/// let user = get_user_by_id(1, &mut stderr).unwrap();
+/// let user = get_user_by_id(1).unwrap();
 ///
 /// ```
 pub fn get_user_by_name<T: AsRef<str>>(username: T) -> Option<User> {
@@ -258,29 +261,29 @@ pub fn get_user_by_name<T: AsRef<str>>(username: T) -> Option<User> {
     file.read_to_string(&mut user_string).try(&mut stderr);
 
     let passwd_file_entries = User::parse_file(&user_string).unwrap();
-    
+
     passwd_file_entries.iter()
         .find(|user| user.user == username.as_ref())
         .cloned()
 }
 
 
-/// Gets the group for a given group id.
+/// Gets the group for a given group ID aborting the caller on error.
 ///
-/// This function will read `/etc/group` file looking for an entry for the provided
-/// returning a `Group` struct representing the group if found and `None` otherwise.
-/// In case of an error it will log message to `stderr` and then will the caller
-/// process with an non-zero exit code.
+/// This function will read the user groups database (currently '/etc/group')
+/// returning a `Group` struct representing the group with a matching ID
+/// and `None` otherwise. In case of an error it will log message to `stderr`
+/// and will exit the caller process with an non-zero exit code.
 ///
 /// # Examples
 ///
 /// Basic usage:
 ///
 /// ```
-/// let group = get_group_by_id(1, &mut stderr).unwrap();
+/// let group = get_group_by_id(1).unwrap();
 ///
 /// ```
-pub fn get_group_by_gid(gid: usize) -> Option<Group> {
+pub fn get_group_by_id(gid: usize) -> Option<Group> {
     let mut stderr = io::stderr();
 
     let mut group_string = String::new();
@@ -293,19 +296,19 @@ pub fn get_group_by_gid(gid: usize) -> Option<Group> {
         .cloned()
 }
 
-/// Gets the group for a given group name.
+/// Gets the group for a given group name aborting the caller on error.
 ///
-/// This function will read `/etc/group` file looking for an entry for the provided
-/// returning a `Group` struct representing the group if found and `None` otherwise.
-/// In case of an error it will log message to `stderr` and then will the caller
-/// process with an non-zero exit code.
+/// This function will read the user groups database (currently '/etc/group')
+/// returning a `Group` struct representing the group with a matching name
+/// and `None` otherwise. In case of an error it will log message to `stderr`
+/// and will exit the caller process with an non-zero exit code.
 ///
 /// # Examples
 ///
 /// Basic usage:
 ///
 /// ```
-/// let group = get_group_by_id(1, &mut stderr).unwrap();
+/// let group = get_group_by_name("wheel").unwrap();
 ///
 /// ```
 pub fn get_group_by_name<T: AsRef<str>>(groupname: T) -> Option<Group> {
