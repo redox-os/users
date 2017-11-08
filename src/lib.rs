@@ -13,17 +13,24 @@ use extra::option::OptionalExt;
 const PASSWD_FILE: &'static str = "/etc/passwd";
 const GROUP_FILE: &'static str = "/etc/group";
 
-/// A struct representing a Redox user
-/// Currently maps to an entry in the '/etc/passwd' file
+/// A struct representing a Redox user.
+/// Currently maps to an entry in the '/etc/passwd' file.
 #[derive(Clone)]
 pub struct User {
-    pub user: String,   // username
-    pub hash: String,   // Hashed password
-    pub uid: u32,       // User id
-    pub gid: u32,       // Group id
-    pub name: String,   // Real username
-    pub home: String,   // Home directory path
-    pub shell: String   // Shell path
+    /// Username
+    pub user: String,
+    /// Hashed password
+    pub hash: String,
+    /// User id
+    pub uid: u32,
+    /// Group id
+    pub gid: u32,
+    /// Real name
+    pub name: String,
+    /// Home directory path
+    pub home: String,
+    /// Shell path
+    pub shell: String
 }
 
 impl User {
@@ -73,13 +80,16 @@ impl User {
     }
 }
 
-/// A struct representing a Redox users group
-/// Currently maps to an '/etc/group' file entry
+/// A struct representing a Redox users group.
+/// Currently maps to an '/etc/group' file entry.
 #[derive(Clone)]
 pub struct Group {
-    pub group: String,  // Group name
-    pub gid: u32,       // Unique group id
-    pub users: String,  // Comma separated list of group members
+    /// Group name
+    pub group: String,
+    // Unique group id
+    pub gid: u32,
+    // Group members usernames
+    pub users: Vec<String>,
 }
 
 impl Group {
@@ -88,12 +98,13 @@ impl Group {
 
         let group = parts.next().ok_or(())?;
         let gid = parts.next().ok_or(())?.parse::<u32>().or(Err(()))?;
-        let users = parts.next().ok_or(())?;
+        let users_str = parts.next().ok_or(())?;
+        let users = users_str.split(',').map(|u| u.into()).collect();
 
         Ok(Group {
             group: group.into(),
             gid: gid,
-            users: users.into()
+            users: users
         })
     }
 
@@ -128,7 +139,7 @@ pub fn get_euid() -> usize {
     match syscall::geteuid() {
         Ok(euid) => euid,
         Err(_) => {
-            eprintln!("failed to get effective UID");
+            eprintln!("redox_users: failed to get effective UID");
             exit(1)
         }
     }
@@ -152,7 +163,7 @@ pub fn get_uid() -> usize {
     match syscall::getuid() {
         Ok(euid) => euid,
         Err(_) => {
-            eprintln!("failed to get real UID");
+            eprintln!("redox_users: failed to get real UID");
             exit(1)
         }
     }
@@ -176,7 +187,7 @@ pub fn get_egid() -> usize {
     match syscall::getegid() {
         Ok(euid) => euid,
         Err(_) => {
-            eprintln!("failed to get effective GID");
+            eprintln!("redox_users: failed to get effective GID");
             exit(1)
         }
     }
@@ -200,7 +211,7 @@ pub fn get_gid() -> usize {
     match syscall::getgid() {
         Ok(euid) => euid,
         Err(_) => {
-            eprintln!("failed to get real GID");
+            eprintln!("redox_users: failed to get real GID");
             exit(1)
         }
     }
