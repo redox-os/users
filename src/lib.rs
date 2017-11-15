@@ -5,6 +5,7 @@ extern crate syscall;
 use std::io::{self, Read};
 use std::fs::File;
 use std::process::exit;
+use std::path::Path;
 
 use argon2rs::verifier::Encoded;
 use argon2rs::{Argon2, Variant};
@@ -15,7 +16,7 @@ const GROUP_FILE: &'static str = "/etc/group";
 
 /// A struct representing a Redox user.
 /// Currently maps to an entry in the '/etc/passwd' file.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct User {
     /// Username
     pub user: String,
@@ -56,7 +57,14 @@ impl User {
         })
     }
 
-    pub fn parse_file(file_data: &str) -> Result<Vec<User>, ()> {
+    pub(crate) fn parse_file<P: AsRef<Path>>(file_path: P) -> Result<Vec<User>, ()> {
+
+        let mut stderr = io::stderr();
+
+        let mut file_data = String::new();
+        let mut file = File::open(file_path).try(&mut stderr);
+        file.read_to_string(&mut file_data).try(&mut stderr);
+
         let mut entries: Vec<User> = Vec::new();
 
         for line in file_data.lines() {
@@ -82,7 +90,7 @@ impl User {
 
 /// A struct representing a Redox users group.
 /// Currently maps to an '/etc/group' file entry.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Group {
     /// Group name
     pub group: String,
@@ -108,7 +116,13 @@ impl Group {
         })
     }
 
-    pub fn parse_file(file_data: &str) -> Result<Vec<Group>, ()> {
+    pub(crate) fn parse_file<P: AsRef<Path>>(file_path: P) -> Result<Vec<Group>, ()> {
+        let mut stderr = io::stderr();
+
+        let mut file_data = String::new();
+        let mut file = File::open(file_path).try(&mut stderr);
+        file.read_to_string(&mut file_data).try(&mut stderr);
+
         let mut entries: Vec<Group> = Vec::new();
 
         for line in file_data.lines() {
@@ -220,10 +234,10 @@ pub fn get_gid() -> usize {
 /// Gets the User representing given user ID aborting the caller on error.
 ///
 /// This function will read the users database (currently '/etc/passwd')
-/// returning a `User` struct representing the user who's UID matches and
-/// `None` otherwise. In case of an error it will log message to `stderr`
-/// and then will exit the caller process an non-zero status code.
-/// with an non-zero exit code.
+/// returning a [`User`](struct.User.html) struct representing the
+/// user who's UID matches and `None` otherwise. In case of an error
+/// it will log message to `stderr` and then will exit the caller
+/// process with an non-zero exit code.
 ///
 /// # Examples
 ///
@@ -234,13 +248,7 @@ pub fn get_gid() -> usize {
 ///
 /// ```
 pub fn get_user_by_id(uid: usize) -> Option<User> {
-    let mut stderr = io::stderr();
-
-    let mut user_string = String::new();
-    let mut file = File::open(PASSWD_FILE).try(&mut stderr);
-    file.read_to_string(&mut user_string).try(&mut stderr);
-
-    let passwd_file_entries = User::parse_file(&user_string).unwrap();
+    let passwd_file_entries = User::parse_file(PASSWD_FILE).unwrap();
 
     passwd_file_entries.iter()
         .find(|user| user.uid as usize == uid)
@@ -251,10 +259,10 @@ pub fn get_user_by_id(uid: usize) -> Option<User> {
 /// caller on error.
 ///
 /// This function will read the users database (currently '/etc/passwd')
-/// returning a `User` struct representing the user who's username
-/// matches and `None` otherwise. In case of an error it will log message
-/// to `stderr` and then will exit the caller process an non-zero status
-/// code.
+/// returning a [`User`](struct.User.html) struct representing the user
+/// who's username matches and `None` otherwise. In case of an error
+/// it will log message to `stderr` and then will exit the caller
+/// process an non-zero status code.
 ///
 /// # Examples
 ///
@@ -265,13 +273,7 @@ pub fn get_user_by_id(uid: usize) -> Option<User> {
 ///
 /// ```
 pub fn get_user_by_name<T: AsRef<str>>(username: T) -> Option<User> {
-    let mut stderr = io::stderr();
-
-    let mut user_string = String::new();
-    let mut file = File::open(PASSWD_FILE).try(&mut stderr);
-    file.read_to_string(&mut user_string).try(&mut stderr);
-
-    let passwd_file_entries = User::parse_file(&user_string).unwrap();
+    let passwd_file_entries = User::parse_file(PASSWD_FILE).unwrap();
 
     passwd_file_entries.iter()
         .find(|user| user.user == username.as_ref())
@@ -282,9 +284,10 @@ pub fn get_user_by_name<T: AsRef<str>>(username: T) -> Option<User> {
 /// Gets the group for a given group ID aborting the caller on error.
 ///
 /// This function will read the user groups database (currently '/etc/group')
-/// returning a `Group` struct representing the group with a matching ID
-/// and `None` otherwise. In case of an error it will log message to `stderr`
-/// and will exit the caller process with an non-zero exit code.
+/// returning a [`Group`](struct.Group.html) struct representing the group
+/// with a matching ID and `None` otherwise. In case of an error it will
+/// log message to `stderr` and will exit the caller process with an
+/// non-zero exit code.
 ///
 /// # Examples
 ///
@@ -295,13 +298,8 @@ pub fn get_user_by_name<T: AsRef<str>>(username: T) -> Option<User> {
 ///
 /// ```
 pub fn get_group_by_id(gid: usize) -> Option<Group> {
-    let mut stderr = io::stderr();
+    let group_file_entries = Group::parse_file(GROUP_FILE).unwrap();
 
-    let mut group_string = String::new();
-    let mut file = File::open(GROUP_FILE).try(&mut stderr);
-    file.read_to_string(&mut group_string).try(&mut stderr);
-
-    let group_file_entries = Group::parse_file(&group_string).unwrap();
     group_file_entries.iter()
         .find(|group| group.gid as usize == gid)
         .cloned()
@@ -310,9 +308,10 @@ pub fn get_group_by_id(gid: usize) -> Option<Group> {
 /// Gets the group for a given group name aborting the caller on error.
 ///
 /// This function will read the user groups database (currently '/etc/group')
-/// returning a `Group` struct representing the group with a matching name
-/// and `None` otherwise. In case of an error it will log message to `stderr`
-/// and will exit the caller process with an non-zero exit code.
+/// returning a [`Group`](struct.Group.html) struct representing the group
+/// with a matching name and `None` otherwise. In case of an error it will
+/// log message to `stderr` and will exit the caller process with an
+/// non-zero exit code.
 ///
 /// # Examples
 ///
@@ -323,14 +322,54 @@ pub fn get_group_by_id(gid: usize) -> Option<Group> {
 ///
 /// ```
 pub fn get_group_by_name<T: AsRef<str>>(groupname: T) -> Option<Group> {
-    let mut stderr = io::stderr();
+    let group_file_entries = Group::parse_file(GROUP_FILE).unwrap();
 
-    let mut group_string = String::new();
-    let mut file = File::open(GROUP_FILE).try(&mut stderr);
-    file.read_to_string(&mut group_string).try(&mut stderr);
-
-    let group_file_entries = Group::parse_file(&group_string).unwrap();
     group_file_entries.iter()
         .find(|group| group.group == groupname.as_ref())
         .cloned()
+}
+
+/// An iterator over all the users in the system.
+///
+/// This function returns an [`AllUsers`](struct.AllUsers.html) iterator that
+/// will yield [`User`](struct.User.html) instances representing each user
+/// in the system.
+///
+/// # Examples
+///
+/// Basic usage:
+///
+/// ```
+/// let users = all_users();
+///
+/// for user in users {
+///     // do something with the user
+/// }
+///
+/// ```
+pub fn all_users() -> AllUsers {
+   AllUsers::new()
+}
+
+/// An iterator over all the users on the system.
+///
+/// This struct is generally created by calling [`all_users`](fn.all_users.html).
+pub struct AllUsers {
+    iter: std::vec::IntoIter<User>
+}
+
+impl AllUsers {
+    pub fn new() -> AllUsers {
+        let users = User::parse_file(PASSWD_FILE).unwrap();
+
+        AllUsers { iter: users.into_iter() }
+    }
+}
+
+impl Iterator for AllUsers {
+    type Item = User;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.iter.next()
+    }
 }
