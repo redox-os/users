@@ -2,10 +2,11 @@ extern crate argon2rs;
 extern crate extra;
 extern crate syscall;
 
-use std::io::{self, Read};
-use std::fs::File;
+use std::io::{self, Read, Write};
+use std::fs::{File, OpenOptions};
 use std::process::exit;
 use std::path::Path;
+use std::result::Result;
 
 use argon2rs::verifier::Encoded;
 use argon2rs::{Argon2, Variant};
@@ -13,6 +14,8 @@ use extra::option::OptionalExt;
 
 const PASSWD_FILE: &'static str = "/etc/passwd";
 const GROUP_FILE: &'static str = "/etc/group";
+const MIN_GID: u32 = 1000;
+const MAX_GID: u32 = 6000;
 
 /// A struct representing a Redox user.
 /// Currently maps to an entry in the '/etc/passwd' file.
@@ -106,7 +109,11 @@ impl Group {
 
         let group = parts.next().ok_or(())?;
         let gid = parts.next().ok_or(())?.parse::<u32>().or(Err(()))?;
-        let users_str = parts.next().ok_or(())?;
+        //Allow for an empty users field. If there is a better way to do this, do it
+        let users_str = match parts.next() {
+            Some(some) => some,
+            None => " "
+        };
         let users = users_str.split(',').map(|u| u.into()).collect();
 
         Ok(Group {
@@ -329,11 +336,11 @@ pub fn get_group_by_name<T: AsRef<str>>(groupname: T) -> Option<Group> {
         .cloned()
 }
 
-/// An iterator over all the users in the system.
+/// An iterator over all the users on the system.
 ///
 /// This function returns an [`AllUsers`](struct.AllUsers.html) iterator that
 /// will yield [`User`](struct.User.html) instances representing each user
-/// in the system.
+/// on the system.
 ///
 /// # Examples
 ///
@@ -349,6 +356,28 @@ pub fn get_group_by_name<T: AsRef<str>>(groupname: T) -> Option<Group> {
 /// ```
 pub fn all_users() -> AllUsers {
    AllUsers::new()
+}
+
+/// An iterator over all the groups on the system.
+///
+/// This function returns an [`AllGroups`](struct.AllGroups.html) iterator that
+/// will yield [`Group`](struct.Group.html) instances representing each group
+/// on the system.
+///
+/// # Examples
+///
+/// Basic usage:
+///
+/// ```
+/// let groups = all_groups();
+///
+/// for group in groups {
+///     // do something with the group
+/// }
+///
+/// ```
+pub fn all_groups() -> AllGroups {
+   AllGroups::new()
 }
 
 /// An iterator over all the users on the system.
@@ -372,4 +401,106 @@ impl Iterator for AllUsers {
     fn next(&mut self) -> Option<Self::Item> {
         self.iter.next()
     }
+}
+
+/// An iterator over all groups on the system
+///
+/// This struct is generally created by calling [`all_groups`](fn.all_groups.html)
+pub struct AllGroups {
+    iter: std::vec::IntoIter<Group>
+}
+
+impl AllGroups {
+    pub fn new() -> AllGroups {
+        let groups = Group::parse_file(GROUP_FILE).unwrap();
+        
+        AllGroups { iter: groups.into_iter() }
+    }
+}
+
+impl Iterator for AllGroups {
+    type Item = Group;
+    
+    fn next(&mut self) -> Option<Self::Item> {
+        self.iter.next()
+    }
+}
+
+///Adds a group with the specified attributes to the
+///groups database (currently `/etc/groups`)
+///
+///Returns Result with error information if the operation was not successful
+///Pleasefix -> Panics if file io was unsuccessful
+//UNOPTIMIZED: This is currently requiring two iterations:
+//  one: for determine if the group already exists
+//  two: if the user calls get_unique_group_id, which iterates over the same iterator
+pub fn add_group(name: &str, gid: u32, users: &[&str]) -> Result<(), &'static str> {
+    for group in all_groups() {
+        if group.group == name || group.gid == gid {
+            return Err("group already exists")
+        }
+    }
+    
+    let mut file = OpenOptions::new()
+        .append(true)
+        .open(GROUP_FILE)
+        .unwrap();
+    
+    let gid = &gid.to_string();
+    
+    let mut attrs = vec![name, gid];
+    for i in 0..users.len() {
+        attrs.push(users[i]);
+    }
+    
+    let entry = attrs.join(";");
+    
+    file.write(entry.as_bytes()).unwrap();
+    file.write("\n".as_bytes()).unwrap();
+    Ok(())
+}
+
+//TODO: Allow for a MIN_GID and MAX_GID config file someplace
+pub fn get_unique_group_id() -> Option<u32> {
+    for gid in MIN_GID..MAX_GID {
+        let mut used = false;
+        for group in all_groups() {
+            if gid == group.gid {
+                used = true;
+                continue;
+            }
+        }
+        if used == false {
+            return Some(gid);
+        }
+    }
+    None
+}
+
+///Adds a user with the specified attributes to the
+///users database (currently `/etc/passwd`)
+///
+///Returns Result with error information if the operation was not successful
+///Pleasefix -> Panics if file io was unsuccessful
+pub fn add_user(user: &str, uid: u32, gid: u32, name: &str, home: &str, shell: &str) -> Result<(), &'static str> {
+    for _user in all_users() {
+        if _user.user == user || _user.uid == uid {
+            return Err("user already exists");
+        }
+    }
+    
+    let mut file = OpenOptions::new()
+        .append(true)
+        .open(PASSWD_FILE)
+        .unwrap();
+    
+    let uid = &uid.to_string();
+    let gid = &gid.to_string();
+    
+    let attrs = vec![user, "", uid, gid, name, home, shell];
+    let entry = attrs.join(";");
+    
+    file.write(entry.as_bytes()).unwrap();
+    file.write("\n".as_bytes()).unwrap();
+    Ok(())
 }
