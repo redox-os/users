@@ -110,10 +110,7 @@ impl Group {
         let group = parts.next().ok_or(())?;
         let gid = parts.next().ok_or(())?.parse::<u32>().or(Err(()))?;
         //Allow for an empty users field. If there is a better way to do this, do it
-        let users_str = match parts.next() {
-            Some(some) => some,
-            None => " "
-        };
+        let users_str = parts.next().unwrap_or(" ");
         let users = users_str.split(',').map(|u| u.into()).collect();
 
         Ok(Group {
@@ -430,21 +427,23 @@ impl Iterator for AllGroups {
 ///groups database (currently `/etc/groups`)
 ///
 ///Returns Result with error information if the operation was not successful
-///Pleasefix -> Panics if file io was unsuccessful
-//UNOPTIMIZED: This is currently requiring two iterations:
+//UNOPTIMIZED: Currently requiring two iterations (if the user calls get_unique_group_id):
 //  one: for determine if the group already exists
 //  two: if the user calls get_unique_group_id, which iterates over the same iterator
-pub fn add_group(name: &str, gid: u32, users: &[&str]) -> Result<(), &'static str> {
+pub fn add_group(name: &str, gid: u32, users: &[&str]) -> Result<(), String> {
     for group in all_groups() {
         if group.group == name || group.gid == gid {
-            return Err("group already exists")
+            return Err("group already exists".to_string())
         }
     }
     
-    let mut file = OpenOptions::new()
-        .append(true)
-        .open(GROUP_FILE)
-        .unwrap();
+    let mut options = OpenOptions::new();
+    options.append(true);
+    
+    let mut file = match options.open(GROUP_FILE) {
+        Ok(file) => file,
+        Err(err) => return Err(format!("{}", err))
+    };
     
     let gid = &gid.to_string();
     
@@ -453,11 +452,12 @@ pub fn add_group(name: &str, gid: u32, users: &[&str]) -> Result<(), &'static st
         attrs.push(users[i]);
     }
     
-    let entry = attrs.join(";");
+    let entry = format!("{}\n", attrs.join(";"));
     
-    file.write(entry.as_bytes()).unwrap();
-    file.write("\n".as_bytes()).unwrap();
-    Ok(())
+    match file.write(entry.as_bytes()) {
+        Ok(_) => Ok(()),
+        Err(err) => Err(format!("{}", err))
+    }
 }
 
 //TODO: Allow for a MIN_GID and MAX_GID config file someplace
@@ -481,26 +481,29 @@ pub fn get_unique_group_id() -> Option<u32> {
 ///users database (currently `/etc/passwd`)
 ///
 ///Returns Result with error information if the operation was not successful
-///Pleasefix -> Panics if file io was unsuccessful
-pub fn add_user(user: &str, uid: u32, gid: u32, name: &str, home: &str, shell: &str) -> Result<(), &'static str> {
+pub fn add_user(user: &str, uid: u32, gid: u32, name: &str, home: &str, shell: &str) -> Result<(), String> {
     for _user in all_users() {
         if _user.user == user || _user.uid == uid {
-            return Err("user already exists");
+            return Err("user already exists".to_string());
         }
     }
     
-    let mut file = OpenOptions::new()
-        .append(true)
-        .open(PASSWD_FILE)
-        .unwrap();
+    let mut options = OpenOptions::new();
+    options.append(true);
+    
+    let mut file = match options.open(GROUP_FILE) {
+        Ok(file) => file,
+        Err(err) => return Err(format!("{}", err))
+    };
     
     let uid = &uid.to_string();
     let gid = &gid.to_string();
     
     let attrs = vec![user, "", uid, gid, name, home, shell];
-    let entry = attrs.join(";");
+    let entry = format!("{}\n", attrs.join(";"));
     
-    file.write(entry.as_bytes()).unwrap();
-    file.write("\n".as_bytes()).unwrap();
-    Ok(())
+    match file.write(entry.as_bytes()) {
+        Ok(_) => Ok(()),
+        Err(err) => Err(format!("{}", err))
+    }
 }
