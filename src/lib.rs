@@ -16,6 +16,8 @@ const PASSWD_FILE: &'static str = "/etc/passwd";
 const GROUP_FILE: &'static str = "/etc/group";
 const MIN_GID: u32 = 1000;
 const MAX_GID: u32 = 6000;
+const MIN_UID: u32 = 1000;
+const MAX_UID: u32 = 6000;
 
 /// A struct representing a Redox user.
 /// Currently maps to an entry in the '/etc/passwd' file.
@@ -423,10 +425,10 @@ impl Iterator for AllGroups {
     }
 }
 
-///Adds a group with the specified attributes to the
-///groups database (currently `/etc/groups`)
+/// Adds a group with the specified attributes to the
+/// groups database (currently `/etc/groups`)
 ///
-///Returns Result with error information if the operation was not successful
+/// Returns Result with error information if the operation was not successful
 //UNOPTIMIZED: Currently requiring two iterations (if the user calls get_unique_group_id):
 //  one: for determine if the group already exists
 //  two: if the user calls get_unique_group_id, which iterates over the same iterator
@@ -460,6 +462,18 @@ pub fn add_group(name: &str, gid: u32, users: &[&str]) -> Result<(), String> {
     }
 }
 
+/// Provides an unused group id, defined as "unused" by the system
+/// defaults, between 1000 and 6000
+///
+/// # Examples
+/// ```
+/// let gid = match get_unique_group_id() {
+///     Some(id) => id,
+///     None => {
+///         eprintln!("no available gid");
+///     }
+/// };
+/// ```
 //TODO: Allow for a MIN_GID and MAX_GID config file someplace
 pub fn get_unique_group_id() -> Option<u32> {
     for gid in MIN_GID..MAX_GID {
@@ -477,10 +491,10 @@ pub fn get_unique_group_id() -> Option<u32> {
     None
 }
 
-///Adds a user with the specified attributes to the
-///users database (currently `/etc/passwd`)
+/// Adds a user with the specified attributes to the
+/// users database (currently `/etc/passwd`)
 ///
-///Returns Result with error information if the operation was not successful
+/// Returns Result with error information if the operation was not successful
 pub fn add_user(user: &str, uid: u32, gid: u32, name: &str, home: &str, shell: &str) -> Result<(), String> {
     for _user in all_users() {
         if _user.user == user || _user.uid == uid {
@@ -491,7 +505,7 @@ pub fn add_user(user: &str, uid: u32, gid: u32, name: &str, home: &str, shell: &
     let mut options = OpenOptions::new();
     options.append(true);
     
-    let mut file = match options.open(GROUP_FILE) {
+    let mut file = match options.open(PASSWD_FILE) {
         Ok(file) => file,
         Err(err) => return Err(format!("{}", err))
     };
@@ -506,4 +520,33 @@ pub fn add_user(user: &str, uid: u32, gid: u32, name: &str, home: &str, shell: &
         Ok(_) => Ok(()),
         Err(err) => Err(format!("{}", err))
     }
+}
+
+/// Provides an unused user id, defined as "unused" by the system
+/// defaults, between 1000 and 6000
+///
+/// # Examples
+/// ```
+/// let uid = match get_unique_user_id() {
+///     Some(id) => id,
+///     None => {
+///         eprintln!("no available uid");
+///     }
+/// };
+/// ```
+//TODO: Allow for a MIN_UID and MAX_UID config file someplace
+pub fn get_unique_user_id() -> Option<u32> {
+    for uid in MIN_UID..MAX_UID {
+        let mut used = false;
+        for user in all_users() {
+            if uid == user.gid {
+                used = true;
+                continue;
+            }
+        }
+        if used == false {
+            return Some(uid);
+        }
+    }
+    None
 }
