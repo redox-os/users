@@ -2,7 +2,7 @@ extern crate argon2rs;
 extern crate extra;
 extern crate syscall;
 
-use std::io::{self, Read, Write};
+use std::io::{self, Error, ErrorKind, Read, Write};
 use std::fs::{File, OpenOptions};
 use std::process::exit;
 use std::path::Path;
@@ -432,10 +432,10 @@ impl Iterator for AllGroups {
 //UNOPTIMIZED: Currently requiring two iterations (if the user calls get_unique_group_id):
 //  one: for determine if the group already exists
 //  two: if the user calls get_unique_group_id, which iterates over the same iterator
-pub fn add_group(name: &str, gid: u32, users: &[&str]) -> Result<(), String> {
+pub fn add_group(name: &str, gid: u32, users: &[&str]) -> Result<(), io::Error> {
     for group in all_groups() {
         if group.group == name || group.gid == gid {
-            return Err("group already exists".to_string())
+            return Err(Error::new(ErrorKind::AlreadyExists, "group already exists"))
         }
     }
     
@@ -444,7 +444,7 @@ pub fn add_group(name: &str, gid: u32, users: &[&str]) -> Result<(), String> {
     
     let mut file = match options.open(GROUP_FILE) {
         Ok(file) => file,
-        Err(err) => return Err(format!("{}", err))
+        Err(err) => return Err(err)
     };
     
     let gid = &gid.to_string();
@@ -458,7 +458,7 @@ pub fn add_group(name: &str, gid: u32, users: &[&str]) -> Result<(), String> {
     
     match file.write(entry.as_bytes()) {
         Ok(_) => Ok(()),
-        Err(err) => Err(format!("{}", err))
+        Err(err) => Err(err)
     }
 }
 
@@ -495,10 +495,10 @@ pub fn get_unique_group_id() -> Option<u32> {
 /// users database (currently `/etc/passwd`)
 ///
 /// Returns Result with error information if the operation was not successful
-pub fn add_user(user: &str, uid: u32, gid: u32, name: &str, home: &str, shell: &str) -> Result<(), String> {
+pub fn add_user(user: &str, uid: u32, gid: u32, name: &str, home: &str, shell: &str) -> Result<(), io::Error> {
     for _user in all_users() {
         if _user.user == user || _user.uid == uid {
-            return Err("user already exists".to_string());
+            return Err(Error::new(ErrorKind::AlreadyExists, "user already exists"));
         }
     }
     
@@ -507,7 +507,7 @@ pub fn add_user(user: &str, uid: u32, gid: u32, name: &str, home: &str, shell: &
     
     let mut file = match options.open(PASSWD_FILE) {
         Ok(file) => file,
-        Err(err) => return Err(format!("{}", err))
+        Err(err) => return Err(err)
     };
     
     let uid = &uid.to_string();
@@ -518,7 +518,7 @@ pub fn add_user(user: &str, uid: u32, gid: u32, name: &str, home: &str, shell: &
     
     match file.write(entry.as_bytes()) {
         Ok(_) => Ok(()),
-        Err(err) => Err(format!("{}", err))
+        Err(err) => Err(err)
     }
 }
 
