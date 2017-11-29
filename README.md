@@ -13,6 +13,10 @@ High level APIs for:
 - Getting the user information for a given username.
 - Getting a group information for a given group name.
 - Iterating over all the users on the system.
+- Iterating over all the groups on the system
+- Adding a user
+- Adding a group
+- Getting an unused gid
 
 We recommend to use these APIs instead of directly manipulating the
 `/etc/group` and `/etc/passwd` as this is an implementation detail and
