@@ -1,14 +1,12 @@
 extern crate argon2rs;
 extern crate extra;
 extern crate syscall;
-extern crate failure;
-#[macro_use] extern crate failure_derive;
+#[macro_use] extern crate failure;
 
 use std::convert::From;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::Path;
-use std::result::Result;
 
 use argon2rs::verifier::Encoded;
 use argon2rs::{Argon2, Variant};
@@ -22,25 +20,19 @@ const MAX_GID: u32 = 6000;
 const MIN_UID: u32 = 1000;
 const MAX_UID: u32 = 6000;
 
+pub type Result<T> = std::result::Result<T , Error>;
+
 /// Errors that might happen while using this crate
-#[derive(Debug, Fail)]
+#[derive(Debug, Fail, PartialEq)]
 pub enum UsersError {
     #[fail(display = "os error: code {}", reason)]
     Os { reason: String },
     #[fail(display = "parse error: {}", reason)]
     Parsing { reason: String },
-    #[fail(display = "user {} found", user)]
-    UserNotFound { user: String },
-    #[fail(display = "group {} not found", group)]
-    GroupNotFound { group: String },
-    #[fail(display = "user with UID {} not found", uid)]
-    UidNotFound { uid: usize },
-    #[fail(display = "group with GID {} not found", gid)]
-    GidNotFound { gid: usize },
-    #[fail(display = "user {}:{} already exists", uid, user)]
-    UserAlreadyExists { uid: usize, user: String },
-    #[fail(display = "group {}:{} already exists", gid, group)]
-    GroupAlreadyExists { gid: usize, group: String },
+    #[fail(display = "user/group not found")]
+    NotFound,
+    #[fail(display = "user/group already exists")]
+    AlreadyExists,
 }
 
 fn parse_error(reason: &str) -> UsersError {
@@ -49,30 +41,6 @@ fn parse_error(reason: &str) -> UsersError {
 
 fn os_error(reason: &str) -> UsersError {
     UsersError::Os { reason: reason.into() }
-}
-
-fn user_not_found_error(user: &str) -> UsersError {
-    UsersError::UserNotFound { user: user.into() }
-}
-
-fn group_not_found_error(group: &str) -> UsersError {
-    UsersError::GroupNotFound { group: group.into() }
-}
-
-fn uid_not_found_error(uid: usize) -> UsersError {
-    UsersError::UidNotFound { uid: uid }
-}
-
-fn gid_not_found_error(gid: usize) -> UsersError {
-    UsersError::GidNotFound { gid: gid }
-}
-
-fn user_already_exists_error(uid: usize, username: String) -> UsersError {
-    UsersError::UserAlreadyExists { uid: uid, user: username }
-}
-
-fn group_already_exists_error(gid: usize, groupname: String) -> UsersError {
-    UsersError::GroupAlreadyExists { gid: gid, group: groupname }
 }
 
 impl From<SyscallError> for UsersError {
@@ -102,10 +70,10 @@ pub struct User {
 }
 
 impl User {
-    pub fn parse(line: &str) -> Result<User, Error> {
+    pub fn parse(line: &str) -> Result<User> {
         let mut parts = line.split(';');
 
-        let user = parts.next().ok_or(parse_error("expected hash"))?;
+        let user = parts.next().ok_or(parse_error("expected user"))?;
         let hash = parts.next().ok_or(parse_error("expected hash"))?;
         let uid = parts.next().ok_or(parse_error("expected uid"))?.parse::<u32>()?;
         let gid = parts.next().ok_or(parse_error("expected uid"))?.parse::<u32>()?;
@@ -124,7 +92,7 @@ impl User {
         })
     }
 
-    pub(crate) fn parse_file<P: AsRef<Path>>(file_path: P) -> Result<Vec<User>, Error> {
+    pub(crate) fn parse_file<P: AsRef<Path>>(file_path: P) -> Result<Vec<User>> {
         let mut file_data = String::new();
         let mut file = File::open(file_path)?;
         file.read_to_string(&mut file_data)?;
@@ -165,7 +133,7 @@ pub struct Group {
 }
 
 impl Group {
-    pub fn parse(line: &str) -> Result<Group, Error> {
+    pub fn parse(line: &str) -> Result<Group> {
         let mut parts = line.split(';');
 
         let group = parts.next().ok_or(parse_error("expected group"))?;
@@ -181,7 +149,7 @@ impl Group {
         })
     }
 
-    pub(crate) fn parse_file<P: AsRef<Path>>(file_path: P) -> Result<Vec<Group>, Error> {
+    pub(crate) fn parse_file<P: AsRef<Path>>(file_path: P) -> Result<Vec<Group>> {
         let mut file_data = String::new();
         let mut file = File::open(file_path)?;
         file.read_to_string(&mut file_data)?;
@@ -211,7 +179,7 @@ impl Group {
 /// let euid = get_euid().unwrap();
 ///
 /// ```
-pub fn get_euid() -> Result<usize, Error> {
+pub fn get_euid() -> Result<usize> {
     match syscall::geteuid() {
         Ok(euid) => Ok(euid),
         Err(syscall_error) => Err(From::from(os_error(syscall_error.text())))
@@ -231,7 +199,7 @@ pub fn get_euid() -> Result<usize, Error> {
 /// let uid = get_uid().unwrap();
 ///
 /// ```
-pub fn get_uid() -> Result<usize, Error> {
+pub fn get_uid() -> Result<usize> {
     match syscall::getuid() {
         Ok(uid) => Ok(uid),
         Err(syscall_error) => Err(From::from(os_error(syscall_error.text())))
@@ -251,7 +219,7 @@ pub fn get_uid() -> Result<usize, Error> {
 /// let egid = get_egid().unwrap();
 ///
 /// ```
-pub fn get_egid() -> Result<usize, Error> {
+pub fn get_egid() -> Result<usize> {
     match syscall::getegid() {
         Ok(egid) => Ok(egid),
         Err(syscall_error) => Err(From::from(os_error(syscall_error.text())))
@@ -271,7 +239,7 @@ pub fn get_egid() -> Result<usize, Error> {
 /// let gid = get_gid().unwrap();
 ///
 /// ```
-pub fn get_gid() -> Result<usize, Error> {
+pub fn get_gid() -> Result<usize> {
     match syscall::getgid() {
         Ok(gid) => Ok(gid),
         Err(syscall_error) => Err(From::from(os_error(syscall_error.text())))
@@ -293,13 +261,13 @@ pub fn get_gid() -> Result<usize, Error> {
 /// let user = get_user_by_id(1).unwrap();
 ///
 /// ```
-pub fn get_user_by_id(uid: usize) -> Result<User, Error> {
+pub fn get_user_by_id(uid: usize) -> Result<User> {
     let passwd_file_entries = User::parse_file(PASSWD_FILE)?;
 
     passwd_file_entries.iter()
         .find(|user| user.uid as usize == uid)
         .cloned()
-        .ok_or(From::from(uid_not_found_error(uid)))
+        .ok_or(From::from(UsersError::NotFound))
 }
 
 /// Gets the [`User`](struct.User.html) representing a user for a given username.
@@ -317,13 +285,13 @@ pub fn get_user_by_id(uid: usize) -> Result<User, Error> {
 /// let user = get_user_by_id(1).unwrap();
 ///
 /// ```
-pub fn get_user_by_name<T: AsRef<str>>(username: T) -> Result<User, Error> {
+pub fn get_user_by_name<T: AsRef<str>>(username: T) -> Result<User> {
     let passwd_file_entries = User::parse_file(PASSWD_FILE)?;
 
     passwd_file_entries.iter()
         .find(|user| user.user == username.as_ref())
         .cloned()
-        .ok_or(From::from(user_not_found_error(username.as_ref())))
+        .ok_or(From::from(UsersError::NotFound))
 }
 
 
@@ -342,13 +310,13 @@ pub fn get_user_by_name<T: AsRef<str>>(username: T) -> Result<User, Error> {
 /// let group = get_group_by_id(1).unwrap();
 ///
 /// ```
-pub fn get_group_by_id(gid: usize) -> Result<Group, Error> {
+pub fn get_group_by_id(gid: usize) -> Result<Group> {
     let group_file_entries = Group::parse_file(GROUP_FILE)?;
 
     group_file_entries.iter()
         .find(|group| group.gid as usize == gid)
         .cloned()
-        .ok_or(From::from(gid_not_found_error(gid)))
+        .ok_or(From::from(UsersError::NotFound))
 }
 
 /// Gets the [`Group`](struct.Group.html) for a given group name.
@@ -366,13 +334,13 @@ pub fn get_group_by_id(gid: usize) -> Result<Group, Error> {
 /// let group = get_group_by_name("wheel").unwrap();
 ///
 /// ```
-pub fn get_group_by_name<T: AsRef<str>>(groupname: T) -> Result<Group, Error> {
+pub fn get_group_by_name<T: AsRef<str>>(groupname: T) -> Result<Group> {
     let group_file_entries = Group::parse_file(GROUP_FILE)?;
 
     group_file_entries.iter()
         .find(|group| group.group == groupname.as_ref())
         .cloned()
-        .ok_or(From::from(group_not_found_error(groupname.as_ref())))
+        .ok_or(From::from(UsersError::NotFound))
 }
 
 /// An iterator over all the users on the system.
@@ -472,10 +440,10 @@ impl Iterator for AllGroups {
 //UNOPTIMIZED: Currently requiring two iterations (if the user calls get_unique_group_id):
 //  one: for determine if the group already exists
 //  two: if the user calls get_unique_group_id, which iterates over the same iterator
-pub fn add_group(name: &str, gid: u32, users: &[&str]) -> Result<(), Error> {
+pub fn add_group(name: &str, gid: u32, users: &[&str]) -> Result<()> {
     for group in all_groups() {
         if group.group == name || group.gid == gid {
-            return Err(From::from(group_already_exists_error(gid as usize, name.into())))
+            return Err(From::from(UsersError::AlreadyExists))
         }
     }
     
@@ -532,10 +500,10 @@ pub fn get_unique_group_id() -> Option<u32> {
 /// users database (currently `/etc/passwd`)
 ///
 /// Returns Result with error information if the operation was not successful
-pub fn add_user(user: &str, uid: u32, gid: u32, name: &str, home: &str, shell: &str) -> Result<(), Error> {
+pub fn add_user(user: &str, uid: u32, gid: u32, name: &str, home: &str, shell: &str) -> Result<()> {
     for _user in all_users() {
         if _user.user == user || _user.uid == uid {
-            return Err(From::from(user_already_exists_error(uid as usize, user.into())))
+            return Err(From::from(UsersError::AlreadyExists))
         }
     }
     
