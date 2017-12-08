@@ -1,16 +1,17 @@
 extern crate argon2rs;
 extern crate extra;
 extern crate syscall;
+#[macro_use] extern crate failure;
 
-use std::io::{self, Error, ErrorKind, Read, Write};
+use std::convert::From;
 use std::fs::{File, OpenOptions};
-use std::process::exit;
+use std::io::{Read, Write};
 use std::path::Path;
-use std::result::Result;
 
 use argon2rs::verifier::Encoded;
 use argon2rs::{Argon2, Variant};
-use extra::option::OptionalExt;
+use failure::Error;
+use syscall::Error as SyscallError;
 
 const PASSWD_FILE: &'static str = "/etc/passwd";
 const GROUP_FILE: &'static str = "/etc/group";
@@ -18,6 +19,35 @@ const MIN_GID: u32 = 1000;
 const MAX_GID: u32 = 6000;
 const MIN_UID: u32 = 1000;
 const MAX_UID: u32 = 6000;
+
+pub type Result<T> = std::result::Result<T , Error>;
+
+/// Errors that might happen while using this crate
+#[derive(Debug, Fail, PartialEq)]
+pub enum UsersError {
+    #[fail(display = "os error: code {}", reason)]
+    Os { reason: String },
+    #[fail(display = "parse error: {}", reason)]
+    Parsing { reason: String },
+    #[fail(display = "user/group not found")]
+    NotFound,
+    #[fail(display = "user/group already exists")]
+    AlreadyExists,
+}
+
+fn parse_error(reason: &str) -> UsersError {
+    UsersError::Parsing { reason: reason.into() }
+}
+
+fn os_error(reason: &str) -> UsersError {
+    UsersError::Os { reason: reason.into() }
+}
+
+impl From<SyscallError> for UsersError {
+    fn from(syscall_error: SyscallError) -> UsersError {
+        UsersError::Os { reason: format!("{}", syscall_error) }
+    }
+}
 
 /// A struct representing a Redox user.
 /// Currently maps to an entry in the '/etc/passwd' file.
@@ -40,16 +70,16 @@ pub struct User {
 }
 
 impl User {
-    pub fn parse(line: &str) -> Result<User, ()> {
+    pub fn parse(line: &str) -> Result<User> {
         let mut parts = line.split(';');
 
-        let user = parts.next().ok_or(())?;
-        let hash = parts.next().ok_or(())?;
-        let uid = parts.next().ok_or(())?.parse::<u32>().or(Err(()))?;
-        let gid = parts.next().ok_or(())?.parse::<u32>().or(Err(()))?;
-        let name = parts.next().ok_or(())?;
-        let home = parts.next().ok_or(())?;
-        let shell = parts.next().ok_or(())?;
+        let user = parts.next().ok_or(parse_error("expected user"))?;
+        let hash = parts.next().ok_or(parse_error("expected hash"))?;
+        let uid = parts.next().ok_or(parse_error("expected uid"))?.parse::<u32>()?;
+        let gid = parts.next().ok_or(parse_error("expected uid"))?.parse::<u32>()?;
+        let name = parts.next().ok_or(parse_error("expected real name"))?;
+        let home = parts.next().ok_or(parse_error("expected home directory path"))?;
+        let shell = parts.next().ok_or(parse_error("expected shell path"))?;
 
         Ok(User {
             user: user.into(),
@@ -62,13 +92,10 @@ impl User {
         })
     }
 
-    pub(crate) fn parse_file<P: AsRef<Path>>(file_path: P) -> Result<Vec<User>, ()> {
-
-        let mut stderr = io::stderr();
-
+    pub(crate) fn parse_file<P: AsRef<Path>>(file_path: P) -> Result<Vec<User>> {
         let mut file_data = String::new();
-        let mut file = File::open(file_path).try(&mut stderr);
-        file.read_to_string(&mut file_data).try(&mut stderr);
+        let mut file = File::open(file_path)?;
+        file.read_to_string(&mut file_data)?;
 
         let mut entries: Vec<User> = Vec::new();
 
@@ -106,11 +133,11 @@ pub struct Group {
 }
 
 impl Group {
-    pub fn parse(line: &str) -> Result<Group, ()> {
+    pub fn parse(line: &str) -> Result<Group> {
         let mut parts = line.split(';');
 
-        let group = parts.next().ok_or(())?;
-        let gid = parts.next().ok_or(())?.parse::<u32>().or(Err(()))?;
+        let group = parts.next().ok_or(parse_error("expected group"))?;
+        let gid = parts.next().ok_or(parse_error("expected gid"))?.parse::<u32>()?;
         //Allow for an empty users field. If there is a better way to do this, do it
         let users_str = parts.next().unwrap_or(" ");
         let users = users_str.split(',').map(|u| u.into()).collect();
@@ -122,12 +149,10 @@ impl Group {
         })
     }
 
-    pub(crate) fn parse_file<P: AsRef<Path>>(file_path: P) -> Result<Vec<Group>, ()> {
-        let mut stderr = io::stderr();
-
+    pub(crate) fn parse_file<P: AsRef<Path>>(file_path: P) -> Result<Vec<Group>> {
         let mut file_data = String::new();
-        let mut file = File::open(file_path).try(&mut stderr);
-        file.read_to_string(&mut file_data).try(&mut stderr);
+        let mut file = File::open(file_path)?;
+        file.read_to_string(&mut file_data)?;
 
         let mut entries: Vec<Group> = Vec::new();
 
@@ -141,109 +166,92 @@ impl Group {
     }
 }
 
-/// Gets the current process effective user id aborting the caller on error.
+/// Gets the current process effective user ID.
 ///
 /// This function issues the `geteuid` system call returning the process effective
-/// user id. In case of an error it will log message to `stderr` and then abort
-/// the caller process with an non-zero exit code.
+/// user id.
 ///
 /// # Examples
 ///
 /// Basic usage:
 ///
 /// ```
-/// let euid = get_euid();
+/// let euid = get_euid().unwrap();
 ///
 /// ```
-pub fn get_euid() -> usize {
+pub fn get_euid() -> Result<usize> {
     match syscall::geteuid() {
-        Ok(euid) => euid,
-        Err(_) => {
-            eprintln!("redox_users: failed to get effective UID");
-            exit(1)
-        }
+        Ok(euid) => Ok(euid),
+        Err(syscall_error) => Err(From::from(os_error(syscall_error.text())))
     }
 }
 
-/// Gets the current process real user id aborting the caller on error.
+/// Gets the current process real user ID.
 ///
 /// This function issues the `getuid` system call returning the process real
-/// user id. In case of an error it will log message to `stderr` and then abort
-/// the caller process with an non-zero exit code.
+/// user id.
 ///
 /// # Examples
 ///
 /// Basic usage:
 ///
 /// ```
-/// let uid = get_uid();
+/// let uid = get_uid().unwrap();
 ///
 /// ```
-pub fn get_uid() -> usize {
+pub fn get_uid() -> Result<usize> {
     match syscall::getuid() {
-        Ok(euid) => euid,
-        Err(_) => {
-            eprintln!("redox_users: failed to get real UID");
-            exit(1)
-        }
+        Ok(uid) => Ok(uid),
+        Err(syscall_error) => Err(From::from(os_error(syscall_error.text())))
     }
 }
 
-/// Gets the current process effective group id aborting the caller on error.
+/// Gets the current process effective group ID.
 ///
 /// This function issues the `getegid` system call returning the process effective
-/// group id. In case of an error it will log message to `stderr` and then abort
-/// the caller process with an non-zero exit code.
+/// group id.
 ///
 /// # Examples
 ///
 /// Basic usage:
 ///
 /// ```
-/// let egid = get_egid();
+/// let egid = get_egid().unwrap();
 ///
 /// ```
-pub fn get_egid() -> usize {
+pub fn get_egid() -> Result<usize> {
     match syscall::getegid() {
-        Ok(euid) => euid,
-        Err(_) => {
-            eprintln!("redox_users: failed to get effective GID");
-            exit(1)
-        }
+        Ok(egid) => Ok(egid),
+        Err(syscall_error) => Err(From::from(os_error(syscall_error.text())))
     }
 }
 
-/// Gets the current process real group id aborting the caller on error.
+/// Gets the current process real group ID.
 ///
 /// This function issues the `getegid` system call returning the process real
-/// group id. In case of an error it will log message to `stderr` and then abort
-/// the caller process with an non-zero exit code.
+/// group id.
 ///
 /// # Examples
 ///
 /// Basic usage:
 ///
 /// ```
-/// let gid = get_gid();
+/// let gid = get_gid().unwrap();
 ///
 /// ```
-pub fn get_gid() -> usize {
+pub fn get_gid() -> Result<usize> {
     match syscall::getgid() {
-        Ok(euid) => euid,
-        Err(_) => {
-            eprintln!("redox_users: failed to get real GID");
-            exit(1)
-        }
+        Ok(gid) => Ok(gid),
+        Err(syscall_error) => Err(From::from(os_error(syscall_error.text())))
     }
 }
 
-/// Gets the User representing given user ID aborting the caller on error.
+/// Gets the [`User`](struct.User.html) representing given user ID.
 ///
 /// This function will read the users database (currently '/etc/passwd')
 /// returning a [`User`](struct.User.html) struct representing the
-/// user who's UID matches and `None` otherwise. In case of an error
-/// it will log message to `stderr` and then will exit the caller
-/// process with an non-zero exit code.
+/// user who's UID matches and [`UsersError::UidNotFound`](enum.UserErrors.html)
+/// otherwise.
 ///
 /// # Examples
 ///
@@ -253,22 +261,21 @@ pub fn get_gid() -> usize {
 /// let user = get_user_by_id(1).unwrap();
 ///
 /// ```
-pub fn get_user_by_id(uid: usize) -> Option<User> {
-    let passwd_file_entries = User::parse_file(PASSWD_FILE).unwrap();
+pub fn get_user_by_id(uid: usize) -> Result<User> {
+    let passwd_file_entries = User::parse_file(PASSWD_FILE)?;
 
     passwd_file_entries.iter()
         .find(|user| user.uid as usize == uid)
         .cloned()
+        .ok_or(From::from(UsersError::NotFound))
 }
 
-/// Gets the User representing a user for a given username aborting the
-/// caller on error.
+/// Gets the [`User`](struct.User.html) representing a user for a given username.
 ///
 /// This function will read the users database (currently '/etc/passwd')
 /// returning a [`User`](struct.User.html) struct representing the user
-/// who's username matches and `None` otherwise. In case of an error
-/// it will log message to `stderr` and then will exit the caller
-/// process an non-zero status code.
+/// who's username matches and [`UsersError::UserNotFound`](enum.UserErrors.html)
+/// otherwise.
 ///
 /// # Examples
 ///
@@ -278,22 +285,22 @@ pub fn get_user_by_id(uid: usize) -> Option<User> {
 /// let user = get_user_by_id(1).unwrap();
 ///
 /// ```
-pub fn get_user_by_name<T: AsRef<str>>(username: T) -> Option<User> {
-    let passwd_file_entries = User::parse_file(PASSWD_FILE).unwrap();
+pub fn get_user_by_name<T: AsRef<str>>(username: T) -> Result<User> {
+    let passwd_file_entries = User::parse_file(PASSWD_FILE)?;
 
     passwd_file_entries.iter()
         .find(|user| user.user == username.as_ref())
         .cloned()
+        .ok_or(From::from(UsersError::NotFound))
 }
 
 
-/// Gets the group for a given group ID aborting the caller on error.
+/// Gets the [`Group`](struct.Group.html) for a given group ID.
 ///
 /// This function will read the user groups database (currently '/etc/group')
 /// returning a [`Group`](struct.Group.html) struct representing the group
-/// with a matching ID and `None` otherwise. In case of an error it will
-/// log message to `stderr` and will exit the caller process with an
-/// non-zero exit code.
+/// with a matching ID and and [`UsersError::GidNotFound`](enum.UsersErrors.html)
+/// otherwise.
 ///
 /// # Examples
 ///
@@ -303,21 +310,21 @@ pub fn get_user_by_name<T: AsRef<str>>(username: T) -> Option<User> {
 /// let group = get_group_by_id(1).unwrap();
 ///
 /// ```
-pub fn get_group_by_id(gid: usize) -> Option<Group> {
-    let group_file_entries = Group::parse_file(GROUP_FILE).unwrap();
+pub fn get_group_by_id(gid: usize) -> Result<Group> {
+    let group_file_entries = Group::parse_file(GROUP_FILE)?;
 
     group_file_entries.iter()
         .find(|group| group.gid as usize == gid)
         .cloned()
+        .ok_or(From::from(UsersError::NotFound))
 }
 
-/// Gets the group for a given group name aborting the caller on error.
+/// Gets the [`Group`](struct.Group.html) for a given group name.
 ///
 /// This function will read the user groups database (currently '/etc/group')
 /// returning a [`Group`](struct.Group.html) struct representing the group
-/// with a matching name and `None` otherwise. In case of an error it will
-/// log message to `stderr` and will exit the caller process with an
-/// non-zero exit code.
+/// with a matching name and [`UsersError::GroupNotFound`](enum.UsersErrors.html)
+/// otherwise.
 ///
 /// # Examples
 ///
@@ -327,12 +334,13 @@ pub fn get_group_by_id(gid: usize) -> Option<Group> {
 /// let group = get_group_by_name("wheel").unwrap();
 ///
 /// ```
-pub fn get_group_by_name<T: AsRef<str>>(groupname: T) -> Option<Group> {
-    let group_file_entries = Group::parse_file(GROUP_FILE).unwrap();
+pub fn get_group_by_name<T: AsRef<str>>(groupname: T) -> Result<Group> {
+    let group_file_entries = Group::parse_file(GROUP_FILE)?;
 
     group_file_entries.iter()
         .find(|group| group.group == groupname.as_ref())
         .cloned()
+        .ok_or(From::from(UsersError::NotFound))
 }
 
 /// An iterator over all the users on the system.
@@ -432,20 +440,17 @@ impl Iterator for AllGroups {
 //UNOPTIMIZED: Currently requiring two iterations (if the user calls get_unique_group_id):
 //  one: for determine if the group already exists
 //  two: if the user calls get_unique_group_id, which iterates over the same iterator
-pub fn add_group(name: &str, gid: u32, users: &[&str]) -> Result<(), io::Error> {
+pub fn add_group(name: &str, gid: u32, users: &[&str]) -> Result<()> {
     for group in all_groups() {
         if group.group == name || group.gid == gid {
-            return Err(Error::new(ErrorKind::AlreadyExists, "group already exists"))
+            return Err(From::from(UsersError::AlreadyExists))
         }
     }
     
     let mut options = OpenOptions::new();
     options.append(true);
     
-    let mut file = match options.open(GROUP_FILE) {
-        Ok(file) => file,
-        Err(err) => return Err(err)
-    };
+    let mut file = options.open(GROUP_FILE)?;
     
     let gid = &gid.to_string();
     
@@ -456,10 +461,9 @@ pub fn add_group(name: &str, gid: u32, users: &[&str]) -> Result<(), io::Error> 
     
     let entry = format!("{}\n", attrs.join(";"));
     
-    match file.write(entry.as_bytes()) {
-        Ok(_) => Ok(()),
-        Err(err) => Err(err)
-    }
+    file.write(entry.as_bytes())?;
+
+    Ok(())
 }
 
 /// Provides an unused group id, defined as "unused" by the system
@@ -488,6 +492,7 @@ pub fn get_unique_group_id() -> Option<u32> {
             return Some(gid);
         }
     }
+
     None
 }
 
@@ -495,20 +500,17 @@ pub fn get_unique_group_id() -> Option<u32> {
 /// users database (currently `/etc/passwd`)
 ///
 /// Returns Result with error information if the operation was not successful
-pub fn add_user(user: &str, uid: u32, gid: u32, name: &str, home: &str, shell: &str) -> Result<(), io::Error> {
+pub fn add_user(user: &str, uid: u32, gid: u32, name: &str, home: &str, shell: &str) -> Result<()> {
     for _user in all_users() {
         if _user.user == user || _user.uid == uid {
-            return Err(Error::new(ErrorKind::AlreadyExists, "user already exists"));
+            return Err(From::from(UsersError::AlreadyExists))
         }
     }
     
     let mut options = OpenOptions::new();
     options.append(true);
     
-    let mut file = match options.open(PASSWD_FILE) {
-        Ok(file) => file,
-        Err(err) => return Err(err)
-    };
+    let mut file = options.open(PASSWD_FILE)?;
     
     let uid = &uid.to_string();
     let gid = &gid.to_string();
@@ -516,10 +518,9 @@ pub fn add_user(user: &str, uid: u32, gid: u32, name: &str, home: &str, shell: &
     let attrs = vec![user, "", uid, gid, name, home, shell];
     let entry = format!("{}\n", attrs.join(";"));
     
-    match file.write(entry.as_bytes()) {
-        Ok(_) => Ok(()),
-        Err(err) => Err(err)
-    }
+    file.write(entry.as_bytes())?;
+
+    Ok(())
 }
 
 /// Provides an unused user id, defined as "unused" by the system
