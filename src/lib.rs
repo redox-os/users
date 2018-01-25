@@ -64,7 +64,7 @@ pub struct User {
     /// Hashed password
     hash: String,
     /// Argon2 Hashing session, stored to simplify API
-    encoded: Encoded,
+    encoded: Option<Encoded>,
     /// User id
     pub uid: usize,
     /// Group id
@@ -89,11 +89,16 @@ impl User {
         let name = parts.next().ok_or(parse_error("expected real name"))?;
         let home = parts.next().ok_or(parse_error("expected home directory path"))?;
         let shell = parts.next().ok_or(parse_error("expected shell path"))?;
-
+        
+        let encoded = match hash {
+            "" => None,
+            _ => Some(Encoded::from_u8(hash.as_bytes())?)
+        };
+        
         Ok(User {
             user: user.into(),
             hash: hash.into(),
-            encoded: Encoded::from_u8(hash.as_bytes())?,
+            encoded: encoded,
             uid: uid,
             gid: gid,
             name: name.into(),
@@ -107,9 +112,10 @@ impl User {
     pub fn set_passwd(&mut self, password: &str) -> Result<()> {
         let a2 = Argon2::new(10, 1, 4096, Variant::Argon2i)?;
         let salt = format!("{:X}", OsRng::new()?.next_u64());
+        let encoded = Encoded::new(a2, password.as_bytes(), salt.as_bytes(), &[], &[]);
         
-        self.encoded = Encoded::new(a2, password.as_bytes(), salt.as_bytes(), &[], &[]);
-        self.hash = String::from_utf8(self.encoded.to_u8())?;
+        self.hash = String::from_utf8(encoded.to_u8())?;
+        self.encoded = Some(encoded);
         Ok(())
     }
     
@@ -117,9 +123,9 @@ impl User {
     /// default behavior and only allow login if the password field is
     /// also empty.
     pub fn verify_passwd(&self, password: &str) -> bool {
-        if self.hash != "" {
-            self.encoded.verify(password.as_bytes())
-        } else if password == "" {
+        if let Some(ref encoded) = self.encoded {
+            encoded.verify(password.as_bytes())
+        } else if self.hash == "" {
             true
         } else {
             false
@@ -324,11 +330,6 @@ impl AllUsers {
     
     /// Borrow the [`User`](struct.User.html) representing a user for a given username.
     ///
-    /// This function will read the users database (currently '/etc/passwd')
-    /// returning a [`User`](struct.User.html) struct representing the user
-    /// who's username matches and [`UsersError::NotFound`](enum.UserError.html#variant.NotFound)
-    /// otherwise.
-    ///
     /// # Examples
     ///
     /// Basic usage:
@@ -337,26 +338,19 @@ impl AllUsers {
     /// let users = AllUsers::new().unwrap();
     /// let user = users.get_user_by_id(1).unwrap();
     /// ```
-    pub fn get_by_name<T: AsRef<str>>(&self, username: T) -> Result<&User> {
+    pub fn get_by_name<T: AsRef<str>>(&self, username: T) -> Option<&User> {
         self.users.iter()
             .find(|user| user.user == username.as_ref())
-            .ok_or(From::from(UsersError::NotFound))
     }
     
     /// Mutable version of ['get_by_name'](struct.AllUsers.html#method.get_by_name)
-    pub fn get_mut_by_name<T: AsRef<str>>(&mut self, username: T) -> Result<&mut User> {
+    pub fn get_mut_by_name<T: AsRef<str>>(&mut self, username: T) -> Option<&mut User> {
         self.users.iter_mut()
             .find(|user| user.user == username.as_ref())
-            .ok_or(From::from(UsersError::NotFound))
     }
     
     /// Borrow the [`User`](struct.AllUsers.html) representing given user ID.
     ///
-    /// This function will read the users database (currently '/etc/passwd')
-    /// returning a [`User`](struct.User.html) struct representing the
-    /// user who's UID matches and [`UsersError::NotFound`](enum.UserError.html#variant.NotFound)
-    /// otherwise.
-    ///
     /// # Examples
     ///
     /// Basic usage:
@@ -365,17 +359,15 @@ impl AllUsers {
     /// let users = AllUsers::new().unwrap();
     /// let user = users.get_user_by_id(1).unwrap();
     /// ```
-    pub fn get_by_id(&self, uid: usize) -> Result<&User> {
+    pub fn get_by_id(&self, uid: usize) -> Option<&User> {
         self.users.iter()
             .find(|user| user.uid == uid)
-            .ok_or(From::from(UsersError::NotFound))
     }
     
     /// Mutable version of [`get_by_id`](struct.AllUsers.html#method.get_by_id)
-    pub fn get_mut_by_id(&mut self, uid: usize) -> Result<&mut User> {
+    pub fn get_mut_by_id(&mut self, uid: usize) -> Option<&mut User> {
         self.users.iter_mut()
             .find(|user| user.uid == uid)
-            .ok_or(From::from(UsersError::NotFound))
     }
     
     /// Provides an unused user id, defined as "unused" by the system
@@ -386,7 +378,6 @@ impl AllUsers {
     /// let users = AllUsers::new().unwrap();
     /// let uid = users.get_unique_user_id().expect("no available uid");
     /// ```
-    //TODO: Allow for a MIN_UID and MAX_UID config file someplace
     pub fn get_unique_id(&self) -> Option<usize> {
         for uid in MIN_UID..MAX_UID {
             let mut used = false;
@@ -406,8 +397,6 @@ impl AllUsers {
     /// Adds a user with the specified attributes to the
     /// users database (currently `/etc/passwd`). Note that the
     /// user's password is set empty during this call.
-    ///
-    /// Returns Result with error information if the operation was not successful
     pub fn add_user(&mut self, login: &str, uid: usize, gid: usize, name: &str, home: &str, shell: &str) -> Result<()> {
         for user in self.users.iter() {
             if user.user == login || user.uid == uid {
@@ -418,7 +407,7 @@ impl AllUsers {
         self.users.push(User{
             user: login.into(),
             hash: "".into(),
-            encoded: Encoded::from_u8("".as_bytes())?,
+            encoded: None,
             uid: uid,
             gid: gid,
             name: name.into(),
@@ -485,10 +474,6 @@ impl AllGroups {
     
     /// Gets the [`Group`](struct.Group.html) for a given group name.
     ///
-    /// This function returns a [`Group`](struct.AllGroups.html) struct representing the group
-    /// with a matching name and [`UsersError::NotFound`](enum.UsersError.html#variant.NotFound)
-    /// otherwise.
-    ///
     /// # Examples
     ///
     /// Basic usage:
@@ -497,24 +482,18 @@ impl AllGroups {
     /// let groups = AllGroups::new().unwrap();
     /// let group = groups.get_group_by_name("wheel").unwrap();
     /// ```
-    pub fn get_by_name<T: AsRef<str>>(&self, groupname: T) -> Result<&Group> {
+    pub fn get_by_name<T: AsRef<str>>(&self, groupname: T) -> Option<&Group> {
         self.groups.iter()
             .find(|group| group.group == groupname.as_ref())
-            .ok_or(From::from(UsersError::NotFound))
     }
     
     /// Mutable version of [`get_by_name`](struct.AllGroups.html#method.get_by_name)
-    pub fn get_mut_by_name<T: AsRef<str>>(&mut self, groupname: T) -> Result<&mut Group> {
+    pub fn get_mut_by_name<T: AsRef<str>>(&mut self, groupname: T) -> Option<&mut Group> {
         self.groups.iter_mut()
             .find(|group| group.group == groupname.as_ref())
-            .ok_or(From::from(UsersError::NotFound))
     }
     
     /// Gets the [`Group`](struct.Group.html) for a given group ID.
-    ///
-    /// This function will return a [`Group`](struct.Group.html) struct representing the group
-    /// with a matching ID and and [`UsersError::NotFound`](enum.UsersError.html#variant.NotFound)
-    /// otherwise.
     ///
     /// # Examples
     ///
@@ -524,17 +503,15 @@ impl AllGroups {
     /// let groups = AllGroups::new().unwrap();
     /// let group = groups.get_group_by_id(1).unwrap();
     /// ```
-    pub fn get_by_id(&self, gid: usize) -> Result<&Group> {
+    pub fn get_by_id(&self, gid: usize) -> Option<&Group> {
         self.groups.iter()
             .find(|group| group.gid == gid)
-            .ok_or(From::from(UsersError::NotFound))
     }
     
     /// Mutable version of [`get_by_id`](struct.AllGroups.html#method.get_by_id)
-    pub fn get_mut_by_id(&mut self, gid: usize) -> Result<&mut Group> {
+    pub fn get_mut_by_id(&mut self, gid: usize) -> Option<&mut Group> {
         self.groups.iter_mut()
             .find(|group| group.gid == gid)
-            .ok_or(From::from(UsersError::NotFound))
     }
     
     /// Provides an unused group id, defined as "unused" by the system
@@ -545,7 +522,6 @@ impl AllGroups {
     /// let groups = AllGroups::new().unwrap();
     /// let gid = groups.get_unique_group_id().expect("no available gid");
     /// ```
-    //TODO: Allow for a MIN_GID and MAX_GID config file someplace
     pub fn get_unique_id(&self) -> Option<usize> {
         for gid in MIN_GID..MAX_GID {
             let mut used = false;
@@ -559,13 +535,10 @@ impl AllGroups {
                 return Some(gid);
             }
         }
-
         None
     }
     
     /// Adds a group with the specified attributes to this AllGroups
-    ///
-    /// Returns Result with error information if the operation was not successful
     ///
     /// Note that calls to this function DO NOT apply changes to the system.
     /// [`write`](struct.AllGroups.html#method.write) must be called for changes to take effect.
