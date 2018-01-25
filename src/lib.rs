@@ -1,27 +1,31 @@
 extern crate argon2rs;
+extern crate rand;
 extern crate extra;
 extern crate syscall;
 #[macro_use] extern crate failure;
 
 use std::convert::From;
-use std::fs::{File, rename};
+use std::fs::{File, OpenOptions, rename};
 use std::io::{Read, Write};
 use std::os::unix::process::CommandExt;
-use std::path::Path;
+use std::os::unix::fs::OpenOptionsExt;
 use std::process::Command;
-use std::vec::IntoIter;
 
 use argon2rs::verifier::Encoded;
 use argon2rs::{Argon2, Variant};
 use failure::Error;
 use syscall::Error as SyscallError;
+use syscall::flag::O_EXCL;
+use rand::os::OsRng;
+use rand::Rng;
 
+//TODO: Allow a configuration file for all this someplace
 const PASSWD_FILE: &'static str = "/etc/passwd";
 const GROUP_FILE: &'static str = "/etc/group";
-const MIN_GID: u32 = 1000;
-const MAX_GID: u32 = 6000;
-const MIN_UID: u32 = 1000;
-const MAX_UID: u32 = 6000;
+const MIN_GID: usize = 1000;
+const MAX_GID: usize = 6000;
+const MIN_UID: usize = 1000;
+const MAX_UID: usize = 6000;
 
 pub type Result<T> = std::result::Result<T , Error>;
 
@@ -54,16 +58,17 @@ impl From<SyscallError> for UsersError {
 
 /// A struct representing a Redox user.
 /// Currently maps to an entry in the '/etc/passwd' file.
-#[derive(Clone, Debug)]
 pub struct User {
     /// Username (login name)
     pub user: String,
     /// Hashed password
     hash: String,
+    /// Argon2 Hashing session, stored to simplify API
+    encoded: Encoded,
     /// User id
-    pub uid: u32,
+    pub uid: usize,
     /// Group id
-    pub gid: u32,
+    pub gid: usize,
     /// Real name (GECOS field)
     pub name: String,
     /// Home directory path
@@ -79,8 +84,8 @@ impl User {
 
         let user = parts.next().ok_or(parse_error("expected user"))?;
         let hash = parts.next().ok_or(parse_error("expected hash"))?;
-        let uid = parts.next().ok_or(parse_error("expected uid"))?.parse::<u32>()?;
-        let gid = parts.next().ok_or(parse_error("expected uid"))?.parse::<u32>()?;
+        let uid = parts.next().ok_or(parse_error("expected uid"))?.parse::<usize>()?;
+        let gid = parts.next().ok_or(parse_error("expected uid"))?.parse::<usize>()?;
         let name = parts.next().ok_or(parse_error("expected real name"))?;
         let home = parts.next().ok_or(parse_error("expected home directory path"))?;
         let shell = parts.next().ok_or(parse_error("expected shell path"))?;
@@ -88,6 +93,7 @@ impl User {
         Ok(User {
             user: user.into(),
             hash: hash.into(),
+            encoded: Encoded::from_u8(hash.as_bytes())?,
             uid: uid,
             gid: gid,
             name: name.into(),
@@ -95,44 +101,34 @@ impl User {
             shell: shell.into()
         })
     }
-
-    pub(crate) fn parse_file<P: AsRef<Path>>(file_path: P) -> Result<Vec<User>> {
-        let mut file_data = String::new();
-        let mut file = File::open(file_path)?;
-        file.read_to_string(&mut file_data)?;
-
-        let mut entries: Vec<User> = Vec::new();
-
-        for line in file_data.lines() {
-            if let Ok(user) = User::parse(line) {
-                entries.push(user);
-            }
-        }
-
-        Ok(entries)
-    }
     
-    /// Set the password for a user.
-    /// TODO: Do not require salt (get an unused one from someplace...)
-    pub fn set_passwd(&mut self, password: &str, salt: &str) -> Result<()> {
+    /// Set the password for a user. Make sure the password you have
+    /// received is actually what the user wants as their password.
+    pub fn set_passwd(&mut self, password: &str) -> Result<()> {
         let a2 = Argon2::new(10, 1, 4096, Variant::Argon2i)?;
-        let e = Encoded::new(a2, password.as_bytes(), salt.as_bytes(), &[], &[]);
-        self.hash = String::from_utf8(e.to_u8())?;
+        let salt = format!("{:X}", OsRng::new()?.next_u64());
+        
+        self.encoded = Encoded::new(a2, password.as_bytes(), salt.as_bytes(), &[], &[]);
+        self.hash = String::from_utf8(self.encoded.to_u8())?;
         Ok(())
     }
     
     /// Verify the password. If the hash is empty, we override Argon's
     /// default behavior and only allow login if the password field is
     /// also empty.
-    pub fn verify_passwd(&self, password: &str) -> Result<bool> {
+    pub fn verify_passwd(&self, password: &str) -> bool {
         if self.hash != "" {
-            let e = Encoded::from_u8(self.hash.as_bytes())?;
-            Ok(e.verify(password.as_bytes()))
+            self.encoded.verify(password.as_bytes())
         } else if password == "" {
-            Ok(true)
+            true
         } else {
-            Ok(false)
+            false
         }
+    }
+    
+    /// Determine if the password is unset
+    pub fn passwd_unset(&self) -> bool {
+        self.hash == ""
     }
     
     /// Get a Command to run the user's default shell
@@ -145,8 +141,8 @@ impl User {
     /// a shell (use [`shell_cmd`](struct.User.html#method.shell_cmd) instead) or a graphical init.
     pub fn login_cmd(&self, cmd: &String) -> Command {
         let mut command = Command::new(cmd);
-        command.uid(self.uid)
-            .gid(self.gid)
+        command.uid(self.uid as u32)
+            .gid(self.gid as u32)
             .current_dir(&self.home)
             .env("USER", &self.user)
             .env("UID", format!("{}", self.uid))
@@ -165,12 +161,11 @@ impl ToString for User {
 
 /// A struct representing a Redox users group.
 /// Currently maps to an '/etc/group' file entry.
-#[derive(Clone, Debug)]
 pub struct Group {
     /// Group name
     pub group: String,
     /// Unique group id
-    pub gid: u32,
+    pub gid: usize,
     /// Group members usernames
     pub users: Vec<String>,
 }
@@ -181,7 +176,7 @@ impl Group {
         let mut parts = line.split(';');
 
         let group = parts.next().ok_or(parse_error("expected group"))?;
-        let gid = parts.next().ok_or(parse_error("expected gid"))?.parse::<u32>()?;
+        let gid = parts.next().ok_or(parse_error("expected gid"))?.parse::<usize>()?;
         //Allow for an empty users field. If there is a better way to do this, do it
         let users_str = parts.next().unwrap_or(" ");
         let users = users_str.split(',').map(|u| u.into()).collect();
@@ -191,22 +186,6 @@ impl Group {
             gid: gid,
             users: users
         })
-    }
-
-    pub(crate) fn parse_file<P: AsRef<Path>>(file_path: P) -> Result<Vec<Group>> {
-        let mut file_data = String::new();
-        let mut file = File::open(file_path)?;
-        file.read_to_string(&mut file_data)?;
-
-        let mut entries: Vec<Group> = Vec::new();
-
-        for line in file_data.lines() {
-            if let Ok(group) = Group::parse(line) {
-                entries.push(group);
-            }
-        }
-
-        Ok(entries)
     }
 }
 
@@ -302,28 +281,44 @@ pub fn get_gid() -> Result<usize> {
 /// (borrowed) access to all the users and groups on the system.
 pub struct AllUsers {
     users: Vec<User>
+    
 }
 
 impl AllUsers {
-    //TODO: Convert this Method to return Result<AllUsers>
+    //TODO: Need to somehow return a valid AllUsers, but still indicate if a line failed
     pub fn new() -> Result<AllUsers> {
-        let users = User::parse_file(PASSWD_FILE)?;
-
-        Ok(AllUsers { users })
+        let mut file_data = String::new();
+        let mut file = File::open(PASSWD_FILE)?;
+        file.read_to_string(&mut file_data)?;
+        
+        let mut entries: Vec<User> = Vec::new();
+        
+        for line in file_data.lines() {
+            if let Ok(user) = User::parse(line) {
+                entries.push(user);
+            }
+        }
+        
+        Ok(AllUsers { users: entries })
     }
     
     /// Syncs the data stored in the AllUsers instance to the filesystem.
     /// To apply changes to the system from an AllUsers, you MUST call this function!
-    /// This is NOT a part of the redox_users API
+    // Not a part of the API
     fn write(&self) -> Result<()> {
         let mut userstring = String::new();
         for user in &self.users {
             userstring.push_str(&format!("{}\n", user.to_string().as_str()));
         }
-        let tempfile = format!("{}.lock", PASSWD_FILE);
-        let mut file = File::create(&tempfile)?;
+        let lockfile_name = format!("{}.lock", PASSWD_FILE);
+        let mut options = OpenOptions::new();
+        options.truncate(true)
+            .write(true)
+            .create(true)
+            .custom_flags(O_EXCL as i32);
+        let mut file = options.open(&lockfile_name)?;
         file.write(userstring.as_bytes())?;
-        rename(tempfile, PASSWD_FILE);
+        rename(lockfile_name, PASSWD_FILE)?;
         Ok(())
     }
     
@@ -372,14 +367,14 @@ impl AllUsers {
     /// ```
     pub fn get_by_id(&self, uid: usize) -> Result<&User> {
         self.users.iter()
-            .find(|user| user.uid as usize == uid)
+            .find(|user| user.uid == uid)
             .ok_or(From::from(UsersError::NotFound))
     }
     
     /// Mutable version of [`get_by_id`](struct.AllUsers.html#method.get_by_id)
     pub fn get_mut_by_id(&mut self, uid: usize) -> Result<&mut User> {
         self.users.iter_mut()
-            .find(|user| user.uid as usize == uid)
+            .find(|user| user.uid == uid)
             .ok_or(From::from(UsersError::NotFound))
     }
     
@@ -392,7 +387,7 @@ impl AllUsers {
     /// let uid = users.get_unique_user_id().expect("no available uid");
     /// ```
     //TODO: Allow for a MIN_UID and MAX_UID config file someplace
-    pub fn get_unique_user_id(&self) -> Option<u32> {
+    pub fn get_unique_id(&self) -> Option<usize> {
         for uid in MIN_UID..MAX_UID {
             let mut used = false;
             for user in self.users.iter() {
@@ -413,7 +408,7 @@ impl AllUsers {
     /// user's password is set empty during this call.
     ///
     /// Returns Result with error information if the operation was not successful
-    pub fn add_user(&mut self, login: &str, uid: u32, gid: u32, name: &str, home: &str, shell: &str) -> Result<()> {
+    pub fn add_user(&mut self, login: &str, uid: usize, gid: usize, name: &str, home: &str, shell: &str) -> Result<()> {
         for user in self.users.iter() {
             if user.user == login || user.uid == uid {
                 return Err(From::from(UsersError::AlreadyExists))
@@ -423,6 +418,7 @@ impl AllUsers {
         self.users.push(User{
             user: login.into(),
             hash: "".into(),
+            encoded: Encoded::from_u8("".as_bytes())?,
             uid: uid,
             gid: gid,
             name: name.into(),
@@ -441,30 +437,30 @@ impl Drop for AllUsers {
     }
 }
 
-/* Not sure if This needs to be an iterator...
-impl Iterator for AllUsers {
-    type Item = User;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        self.iter.next()
-    }
-}*/
-
 /// Struct encapsulating all the groups on the system
 ///
 /// [`AllGroups`](struct.AllGroups.html) is a struct that provides
 /// (borrowed) access to all groups on the system.
 pub struct AllGroups {
     groups: Vec<Group>
-    //iter: IntoIter<Group>
 }
 
 impl AllGroups {
-    /// Create a new AllGroups, parsing the group file.
+    ///TODO: Indicate if parsing an individual line failed or not
     pub fn new() -> Result<AllGroups> {
-        let groups = Group::parse_file(GROUP_FILE)?;
+        let mut file_data = String::new();
+        let mut file = File::open(GROUP_FILE)?;
+        file.read_to_string(&mut file_data)?;
         
-        Ok(AllGroups{ groups })
+        let mut entries: Vec<Group> = Vec::new();
+        
+        for line in file_data.lines() {
+            if let Ok(group) = Group::parse(line) {
+                entries.push(group);
+            }
+        }
+        
+        Ok(AllGroups{ groups: entries })
     }
     
     /// Syncs the data stored in the AllGroups instance to the filesystem.
@@ -475,10 +471,15 @@ impl AllGroups {
         for group in &self.groups {
             groupstring.push_str(&format!("{}\n", group.to_string().as_str()));
         }
-        let tempfile = format!("{}.lock", GROUP_FILE);
-        let mut file = File::create(&tempfile)?;
+        let lockfile_name = format!("{}.lock", GROUP_FILE);
+        let mut options = OpenOptions::new();
+        options.truncate(true)
+            .write(true)
+            .create(true)
+            .custom_flags(O_EXCL as i32);
+        let mut file = options.open(&lockfile_name)?;
         file.write(groupstring.as_bytes())?;
-        rename(tempfile, GROUP_FILE);
+        rename(lockfile_name, GROUP_FILE)?;
         Ok(())
     }
     
@@ -523,14 +524,14 @@ impl AllGroups {
     /// let groups = AllGroups::new().unwrap();
     /// let group = groups.get_group_by_id(1).unwrap();
     /// ```
-    pub fn get_by_id(&self, gid: u32) -> Result<&Group> {
+    pub fn get_by_id(&self, gid: usize) -> Result<&Group> {
         self.groups.iter()
             .find(|group| group.gid == gid)
             .ok_or(From::from(UsersError::NotFound))
     }
     
     /// Mutable version of [`get_by_id`](struct.AllGroups.html#method.get_by_id)
-    pub fn get_mut_by_id(&mut self, gid: u32) -> Result<&mut Group> {
+    pub fn get_mut_by_id(&mut self, gid: usize) -> Result<&mut Group> {
         self.groups.iter_mut()
             .find(|group| group.gid == gid)
             .ok_or(From::from(UsersError::NotFound))
@@ -545,7 +546,7 @@ impl AllGroups {
     /// let gid = groups.get_unique_group_id().expect("no available gid");
     /// ```
     //TODO: Allow for a MIN_GID and MAX_GID config file someplace
-    pub fn get_unique_group_id(&self) -> Option<u32> {
+    pub fn get_unique_id(&self) -> Option<usize> {
         for gid in MIN_GID..MAX_GID {
             let mut used = false;
             for group in self.groups.iter() {
@@ -571,7 +572,7 @@ impl AllGroups {
     //UNOPTIMIZED: Currently requiring two iterations (if the user calls get_unique_group_id):
     //  one: for determine if the group already exists
     //  two: if the user calls get_unique_group_id, which iterates over the same iterator
-    pub fn add_group(&mut self, name: &str, gid: u32, users: &[&str]) -> Result<()> {
+    pub fn add_group(&mut self, name: &str, gid: usize, users: &[&str]) -> Result<()> {
         for group in self.groups.iter() {
             if group.group == name || group.gid == gid {
                 return Err(From::from(UsersError::AlreadyExists))
@@ -596,12 +597,3 @@ impl Drop for AllGroups {
         self.write();
     }
 }
-
-/*
-impl Iterator for AllGroups {
-    type Item = Group;
-    
-    fn next(&mut self) -> Option<Self::Item> {
-        self.iter.next()
-    }
-}*/
