@@ -393,14 +393,7 @@ impl AllUsers {
     /// ```
     pub fn get_unique_id(&self) -> Option<usize> {
         for uid in MIN_UID..MAX_UID {
-            let mut used = false;
-            for user in self.users.iter() {
-                if uid == user.gid {
-                    used = true;
-                    continue;
-                }
-            }
-            if used == false {
+            if !self.users.iter().any(|user| uid == user.uid) {
                 return Some(uid);
             }
         }
@@ -415,10 +408,8 @@ impl AllUsers {
     /// and users must therefore call [`save`](struct.AllUsers.html#method.save)
     /// in order for the new user to be applied to the system.
     pub fn add_user(&mut self, login: &str, uid: usize, gid: usize, name: &str, home: &str, shell: &str) -> Result<()> {
-        for user in self.users.iter() {
-            if user.user == login || user.uid == uid {
-                return Err(From::from(UsersError::AlreadyExists))
-            }
+        if self.users.iter().any(|user| user.user == login || user.uid == uid) {
+            return Err(From::from(UsersError::AlreadyExists))
         }
         
         self.users.push(User{
@@ -540,14 +531,7 @@ impl AllGroups {
     /// ```
     pub fn get_unique_id(&self) -> Option<usize> {
         for gid in MIN_GID..MAX_GID {
-            let mut used = false;
-            for group in self.groups.iter() {
-                if gid == group.gid {
-                    used = true;
-                    continue;
-                }
-            }
-            if used == false {
+            if !self.groups.iter().any(|group| gid == group.gid) {
                 return Some(gid);
             }
         }
@@ -560,10 +544,8 @@ impl AllGroups {
     /// and users must therefore call [`save`](struct.AllUsers.html#method.save)
     /// in order for the new group to be applied to the system.
     pub fn add_group(&mut self, name: &str, gid: usize, users: &[&str]) -> Result<()> {
-        for group in self.groups.iter() {
-            if group.group == name || group.gid == gid {
-                return Err(From::from(UsersError::AlreadyExists))
-            }
+        if self.groups.iter().any(|group| group.group == name || group.gid == gid) {
+            return Err(From::from(UsersError::AlreadyExists))
         }
         
         self.groups.push(Group {
