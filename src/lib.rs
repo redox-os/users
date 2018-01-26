@@ -132,19 +132,38 @@ impl User {
         }
     }
     
-    /// Determine if the password is unset
-    pub fn passwd_unset(&self) -> bool {
+    /// Determine if the hash for the password is blank
+    /// (Any user can log in as this user with no password).
+    pub fn is_passwd_blank(&self) -> bool {
         self.hash == ""
     }
     
+    /// Determine if the hash for the password is unset
+    /// (No users can log in as this user, aka, must use sudo or su)
+    pub fn is_passwd_unset(&self) -> bool {
+        //TODO: Implement this...
+        false
+    }
+    
     /// Get a Command to run the user's default shell
+    /// (See [`login_cmd`](struct.User.html#method.login_cmd) for more doc)
     pub fn shell_cmd(&self) -> Command {
-        self.login_cmd(&self.user)
+        self.login_cmd(&self.shell)
     }
     
     /// Provide a login command for the user, which is any
     /// entry point for starting a user's session, whether
     /// a shell (use [`shell_cmd`](struct.User.html#method.shell_cmd) instead) or a graphical init.
+    ///
+    /// The `Command` will have set the users UID and GID, its CWD will be
+    /// set to the users's home directory and the follwing enviroment variables will
+    /// be populated like so:
+    ///
+    ///    - `USER` set to the user's `user` field.
+    ///    - `UID` set to the user's `uid` field.
+    ///    - `GROUPS` set the user's `gid` field.
+    ///    - `HOME` set to the user's `home` field.
+    ///    - `SHELL` set to the user's `shell` field.
     pub fn login_cmd(&self, cmd: &String) -> Command {
         let mut command = Command::new(cmd);
         command.uid(self.uid as u32)
@@ -285,13 +304,27 @@ pub fn get_gid() -> Result<usize> {
 ///
 /// [`AllUsers`](struct.AllUsers.html) is a struct providing
 /// (borrowed) access to all the users and groups on the system.
+///
+/// ## Notes
+/// Note that everything in this section also applies to
+/// [`AllGroups`](struct.AllGroups.html)
+///
+/// * If you mutate anything in conjunction with an AllUsers,
+///   you must call the [`save`](struct.AllUsers.html#method.save)
+///   method in order for those changes to be applied to the system.
+/// * The API here is kept small on purpose in order to reduce the
+///   surface area for security exploitation. Most mutating actions
+///   can be accomplished via the [`get_mut_by_id`](struct.AllUsers.html#method.get_mut_by_id)
+///   and [`get_mut_by_name`](struct.AllUsers.html#method.get_mut_by_name)
+///   functions.
 pub struct AllUsers {
     users: Vec<User>
     
 }
 
 impl AllUsers {
-    //TODO: Need to somehow return a valid AllUsers, but still indicate if a line failed
+    /// Create a new AllUsers
+    //TODO: Indicate if parsing an individual line failed or not
     pub fn new() -> Result<AllUsers> {
         let mut file_data = String::new();
         let mut file = File::open(PASSWD_FILE)?;
@@ -306,26 +339,6 @@ impl AllUsers {
         }
         
         Ok(AllUsers { users: entries })
-    }
-    
-    /// Syncs the data stored in the AllUsers instance to the filesystem.
-    /// To apply changes to the system from an AllUsers, you MUST call this function!
-    // Not a part of the API
-    fn write(&self) -> Result<()> {
-        let mut userstring = String::new();
-        for user in &self.users {
-            userstring.push_str(&format!("{}\n", user.to_string().as_str()));
-        }
-        let lockfile_name = format!("{}.lock", PASSWD_FILE);
-        let mut options = OpenOptions::new();
-        options.truncate(true)
-            .write(true)
-            .create(true)
-            .custom_flags(O_EXCL as i32);
-        let mut file = options.open(&lockfile_name)?;
-        file.write(userstring.as_bytes())?;
-        rename(lockfile_name, PASSWD_FILE)?;
-        Ok(())
     }
     
     /// Borrow the [`User`](struct.User.html) representing a user for a given username.
@@ -395,8 +408,12 @@ impl AllUsers {
     }
     
     /// Adds a user with the specified attributes to the
-    /// users database (currently `/etc/passwd`). Note that the
+    /// AllUsers instance. Note that the
     /// user's password is set empty during this call.
+    ///
+    /// This function is classified as a mutating operation,
+    /// and users must therefore call [`save`](struct.AllUsers.html#method.save)
+    /// in order for the new user to be applied to the system.
     pub fn add_user(&mut self, login: &str, uid: usize, gid: usize, name: &str, home: &str, shell: &str) -> Result<()> {
         for user in self.users.iter() {
             if user.user == login || user.uid == uid {
@@ -414,15 +431,27 @@ impl AllUsers {
             home: home.into(),
             shell: shell.into()
         });
-
         Ok(())
     }
-}
-
-//TODO: Do this in a way that propagates errors to application
-impl Drop for AllUsers {
-    fn drop(&mut self) {
-        self.write();
+    
+    /// Syncs the data stored in the AllUsers instance to the filesystem.
+    /// To apply changes to the system from an AllUsers, you MUST call this function!
+    /// This function currently does a bunch of fs I/O so it is error-prone.
+    pub fn save(&self) -> Result<()> {
+        let mut userstring = String::new();
+        for user in &self.users {
+            userstring.push_str(&format!("{}\n", user.to_string().as_str()));
+        }
+        let lockfile_name = format!("{}.lock", PASSWD_FILE);
+        let mut options = OpenOptions::new();
+        options.truncate(true)
+            .write(true)
+            .create(true)
+            .custom_flags(O_EXCL as i32);
+        let mut file = options.open(&lockfile_name)?;
+        file.write(userstring.as_bytes())?;
+        rename(lockfile_name, PASSWD_FILE)?;
+        Ok(())
     }
 }
 
@@ -430,12 +459,19 @@ impl Drop for AllUsers {
 ///
 /// [`AllGroups`](struct.AllGroups.html) is a struct that provides
 /// (borrowed) access to all groups on the system.
+///
+/// General notes that also apply to this struct may be found with
+/// [`AllUsers`](struct.AllUsers.html).
 pub struct AllGroups {
     groups: Vec<Group>
 }
 
+//UNOPTIMIZED: Right now this struct is just a Vec and we are doing O(n)
+// operations over the vec to do the `get` methods. A multi-key
+// hashmap would be a godsend here for performance.
 impl AllGroups {
-    ///TODO: Indicate if parsing an individual line failed or not
+    /// Create a new AllGroups
+    //TODO: Indicate if parsing an individual line failed or not
     pub fn new() -> Result<AllGroups> {
         let mut file_data = String::new();
         let mut file = File::open(GROUP_FILE)?;
@@ -450,26 +486,6 @@ impl AllGroups {
         }
         
         Ok(AllGroups{ groups: entries })
-    }
-    
-    /// Syncs the data stored in the AllGroups instance to the filesystem.
-    /// To apply changes to the AllGroups, you MUST call this function.
-    /// This is NOT a part of the redox_users API
-    fn write(&self) -> Result<()> {
-        let mut groupstring = String::new();
-        for group in &self.groups {
-            groupstring.push_str(&format!("{}\n", group.to_string().as_str()));
-        }
-        let lockfile_name = format!("{}.lock", GROUP_FILE);
-        let mut options = OpenOptions::new();
-        options.truncate(true)
-            .write(true)
-            .create(true)
-            .custom_flags(O_EXCL as i32);
-        let mut file = options.open(&lockfile_name)?;
-        file.write(groupstring.as_bytes())?;
-        rename(lockfile_name, GROUP_FILE)?;
-        Ok(())
     }
     
     /// Gets the [`Group`](struct.Group.html) for a given group name.
@@ -540,11 +556,9 @@ impl AllGroups {
     
     /// Adds a group with the specified attributes to this AllGroups
     ///
-    /// Note that calls to this function DO NOT apply changes to the system.
-    /// [`write`](struct.AllGroups.html#method.write) must be called for changes to take effect.
-    //UNOPTIMIZED: Currently requiring two iterations (if the user calls get_unique_group_id):
-    //  one: for determine if the group already exists
-    //  two: if the user calls get_unique_group_id, which iterates over the same iterator
+    /// This function is classified as a mutating operation,
+    /// and users must therefore call [`save`](struct.AllUsers.html#method.save)
+    /// in order for the new group to be applied to the system.
     pub fn add_group(&mut self, name: &str, gid: usize, users: &[&str]) -> Result<()> {
         for group in self.groups.iter() {
             if group.group == name || group.gid == gid {
@@ -562,11 +576,24 @@ impl AllGroups {
         
         Ok(())
     }
-}
-
-//TODO: Do this in a way that propagates errors to application
-impl Drop for AllGroups {
-    fn drop(&mut self) {
-        self.write();
+    
+    /// Syncs the data stored in the AllGroups instance to the filesystem.
+    /// To apply changes to the AllGroups, you MUST call this function.
+    /// This function currently does a lot of fs I/O so it is error-prone.
+    pub fn save(&self) -> Result<()> {
+        let mut groupstring = String::new();
+        for group in &self.groups {
+            groupstring.push_str(&format!("{}\n", group.to_string().as_str()));
+        }
+        let lockfile_name = format!("{}.lock", GROUP_FILE);
+        let mut options = OpenOptions::new();
+        options.truncate(true)
+            .write(true)
+            .create(true)
+            .custom_flags(O_EXCL as i32);
+        let mut file = options.open(&lockfile_name)?;
+        file.write(groupstring.as_bytes())?;
+        rename(lockfile_name, GROUP_FILE)?;
+        Ok(())
     }
 }
