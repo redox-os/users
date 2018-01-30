@@ -58,6 +58,22 @@ impl From<SyscallError> for UsersError {
 
 /// A struct representing a Redox user.
 /// Currently maps to an entry in the '/etc/passwd' file.
+///
+/// # Unset vs. Blank Passwords
+/// A note on unset passwords vs. blank passwords. A blank password
+/// is a hash field that is completely blank (aka, `""`). According
+/// to this crate, login is only allowed if the input password is blank
+/// as well.
+///
+/// An unset
+/// password is one whose hash is not empty (`""`), but also not a valid
+/// serialized argon2rs hashing session. This hash always returns false
+/// upon attempted verification. The most commonly used hash for an
+/// unset password is `"!"`, but this crate makes no distinction.
+/// The most common way to unset the password is to use [`unset_passwd`](struct.User.html#method.unset_passwd).
+///
+/// Note that `"x"` should not be used as the hash field because
+/// that indicates that a hash is stored in the shadowfile, not passwd
 pub struct User {
     /// Username (login name)
     pub user: String,
@@ -92,6 +108,7 @@ impl User {
         
         let encoded = match hash {
             "" => None,
+            "!" => None,
             _ => Some(Encoded::from_u8(hash.as_bytes())?)
         };
         
@@ -109,14 +126,32 @@ impl User {
     
     /// Set the password for a user. Make sure the password you have
     /// received is actually what the user wants as their password.
+    ///
+    /// To set the password blank, use `""` as the password parameter.
     pub fn set_passwd(&mut self, password: &str) -> Result<()> {
-        let a2 = Argon2::new(10, 1, 4096, Variant::Argon2i)?;
-        let salt = format!("{:X}", OsRng::new()?.next_u64());
-        let encoded = Encoded::new(a2, password.as_bytes(), salt.as_bytes(), &[], &[]);
+        let hash;
+        let encoded;
+        if password != "" {
+            let a2 = Argon2::new(10, 1, 4096, Variant::Argon2i)?;
+            let salt = format!("{:X}", OsRng::new()?.next_u64());
+            let enc = Encoded::new(a2, password.as_bytes(), salt.as_bytes(), &[], &[]);
+            
+            hash = String::from_utf8(enc.to_u8())?;
+            encoded = Some(enc);
+        } else {
+            hash = "".into();
+            encoded = None;
+        }
         
-        self.hash = String::from_utf8(encoded.to_u8())?;
-        self.encoded = Some(encoded);
+        self.hash = hash;
+        self.encoded = encoded;
         Ok(())
+    }
+    
+    /// Unset the password (do not allow logins)
+    pub fn unset_passwd(&mut self) {
+        self.encoded = None;
+        self.hash = "!".into();
     }
     
     /// Verify the password. If the hash is empty, we override Argon's
@@ -125,7 +160,7 @@ impl User {
     pub fn verify_passwd(&self, password: &str) -> bool {
         if let Some(ref encoded) = self.encoded {
             encoded.verify(password.as_bytes())
-        } else if self.hash == "" {
+        } else if self.hash == "" && password == "" {
             true
         } else {
             false
@@ -141,8 +176,7 @@ impl User {
     /// Determine if the hash for the password is unset
     /// (No users can log in as this user, aka, must use sudo or su)
     pub fn is_passwd_unset(&self) -> bool {
-        //TODO: Implement this...
-        false
+        self.encoded.is_none() && self.hash != ""
     }
     
     /// Get a Command to run the user's default shell
@@ -404,7 +438,7 @@ impl AllUsers {
     
     /// Adds a user with the specified attributes to the
     /// AllUsers instance. Note that the
-    /// user's password is set empty during this call.
+    /// user's password is set unset during this call.
     ///
     /// This function is classified as a mutating operation,
     /// and users must therefore call [`save`](struct.AllUsers.html#method.save)
@@ -416,7 +450,7 @@ impl AllUsers {
         
         self.users.push(User{
             user: login.into(),
-            hash: "".into(),
+            hash: "!".into(),
             encoded: None,
             uid: uid,
             gid: gid,
