@@ -164,7 +164,9 @@ impl User {
     ///    - `GROUPS` set the user's `gid` field.
     ///    - `HOME` set to the user's `home` field.
     ///    - `SHELL` set to the user's `shell` field.
-    pub fn login_cmd(&self, cmd: &String) -> Command {
+    pub fn login_cmd<T: AsRef<str>>(&self, cmd: T) -> Command where
+        T: std::convert::AsRef<std::ffi::OsStr>
+    {
         let mut command = Command::new(cmd);
         command.uid(self.uid as u32)
             .gid(self.gid as u32)
@@ -425,6 +427,35 @@ impl AllUsers {
         Ok(())
     }
     
+    /// Remove a user from the system. This is a mutating operation,
+    /// and users of the crate must therefore call [`save`](struct.AllUsers.html#method.save)
+    /// in order for changes to be applied to the system.
+    pub fn remove_by_name(&mut self, name: String) -> Result<()> {
+        self.remove(|user| user.user == name )
+    }
+    
+    /// User-id version of [`remove_by_name`](struct.AllUsers.html#method.remove_by_name)
+    pub fn remove_by_id(&mut self, id: usize) -> Result<()> {
+        self.remove(|user| user.uid == id )
+    }
+    
+    // Reduce code duplication
+    fn remove<P>(&mut self, predicate: P) -> Result<()> where
+        P: FnMut(&User) -> bool
+    {
+        let pos;
+        {
+            let mut iter = self.users.iter();
+            if let Some(posi) = iter.position(predicate) {
+                pos = posi;
+            } else {
+                return Err(From::from(UsersError::NotFound));
+            };
+        }
+        self.users.remove(pos);
+        Ok(())
+    }
+    
     /// Syncs the data stored in the AllUsers instance to the filesystem.
     /// To apply changes to the system from an AllUsers, you MUST call this function!
     /// This function currently does a bunch of fs I/O so it is error-prone.
@@ -556,6 +587,35 @@ impl AllGroups {
             //users: users.iter().map(String::to_string).collect()
         });
         
+        Ok(())
+    }
+    
+    /// Remove a group from the system. This is a mutating operation,
+    /// and users of the crate must therefore call [`save`](struct.AllGroups.html#method.save)
+    /// in order for changes to be applied to the system.
+    pub fn remove_by_name(&mut self, name: String) -> Result<()> {
+        self.remove(|group| group.group == name )
+    }
+    
+    /// Group-id version of [`remove_by_name`](struct.AllGroups.html#method.remove_by_name)
+    pub fn remove_by_id(&mut self, id: usize) -> Result<()> {
+        self.remove(|group| group.gid == id )
+    }
+    
+    // Reduce code duplication
+    fn remove<P>(&mut self, predicate: P) -> Result<()> where
+        P: FnMut(&Group) -> bool
+    {
+        let pos;
+        {
+            let mut iter = self.groups.iter();
+            if let Some(posi) = iter.position(predicate) {
+                pos = posi;
+            } else {
+                return Err(From::from(UsersError::NotFound));
+            };
+        }
+        self.groups.remove(pos);
         Ok(())
     }
     
