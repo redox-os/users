@@ -5,17 +5,17 @@ extern crate syscall;
 #[macro_use] extern crate failure;
 
 use std::convert::From;
-use std::fs::{File, OpenOptions, rename};
-use std::io::{Read, Write};
+use std::fs::File;
+use std::io::Read;
 use std::os::unix::process::CommandExt;
-use std::os::unix::fs::OpenOptionsExt;
 use std::process::Command;
 
 use argon2rs::verifier::Encoded;
 use argon2rs::{Argon2, Variant};
 use failure::Error;
+use syscall::call::{close, open, write};
 use syscall::Error as SyscallError;
-use syscall::flag::O_EXCL;
+use syscall::flag::{O_CLOEXEC, O_EXLOCK, O_TRUNC, O_WRONLY};
 use rand::os::OsRng;
 use rand::Rng;
 
@@ -53,6 +53,37 @@ fn os_error(reason: &str) -> UsersError {
 impl From<SyscallError> for UsersError {
     fn from(syscall_error: SyscallError) -> UsersError {
         UsersError::Os { reason: format!("{}", syscall_error) }
+    }
+}
+
+//TODO: Actually lock the file from writes (O_SHLOCK)
+fn read_locked_file(file: &str) -> Result<String> {
+    let mut file_data = String::new();
+    let mut file = File::open(file)?;
+    file.read_to_string(&mut file_data)?;
+    Ok(file_data)
+}
+
+fn write_locked_file(file: &str, data: String) -> Result<()> {
+    let fd = match open(file, O_WRONLY | O_TRUNC | O_EXLOCK | O_CLOEXEC) {
+        Ok(fd) => fd,
+        Err(err) => return Err(os_error(&format!("{}: {}", err, file)).into())
+    };
+    match write(fd, data.as_bytes()) {
+        Ok(_bytes) => {
+            match close(fd) {
+                Ok(_) => (),
+                Err(err) => return Err(os_error(&format!("{}: {}", err, file)).into())
+            };
+            Ok(())
+        },
+        Err(err) => {
+            match close(fd) {
+                Ok(_) => (),
+                Err(err) => return Err(os_error(&format!("{}: {}", err, file)).into())
+            };
+            Err(os_error(&format!("{}: {}", err, file)).into())
+        }
     }
 }
 
@@ -362,13 +393,11 @@ impl AllUsers {
     /// Create a new AllUsers
     //TODO: Indicate if parsing an individual line failed or not
     pub fn new() -> Result<AllUsers> {
-        let mut file_data = String::new();
-        let mut file = File::open(PASSWD_FILE)?;
-        file.read_to_string(&mut file_data)?;
+        let passwd_cntnt = read_locked_file(PASSWD_FILE)?;
         
         let mut entries: Vec<User> = Vec::new();
         
-        for line in file_data.lines() {
+        for line in passwd_cntnt.lines() {
             if let Ok(user) = User::parse(line) {
                 entries.push(user);
             }
@@ -498,16 +527,8 @@ impl AllUsers {
         for user in &self.users {
             userstring.push_str(&format!("{}\n", user.to_string().as_str()));
         }
-        let lockfile_name = format!("{}.lock", PASSWD_FILE);
-        let mut options = OpenOptions::new();
-        options.truncate(true)
-            .write(true)
-            .create(true)
-            .custom_flags(O_EXCL as i32);
-        let mut file = options.open(&lockfile_name)?;
-        file.write(userstring.as_bytes())?;
-        rename(lockfile_name, PASSWD_FILE)?;
-        Ok(())
+        
+        write_locked_file(PASSWD_FILE, userstring)
     }
 }
 
@@ -529,13 +550,11 @@ impl AllGroups {
     /// Create a new AllGroups
     //TODO: Indicate if parsing an individual line failed or not
     pub fn new() -> Result<AllGroups> {
-        let mut file_data = String::new();
-        let mut file = File::open(GROUP_FILE)?;
-        file.read_to_string(&mut file_data)?;
+        let group_cntnt = read_locked_file(GROUP_FILE)?;
         
         let mut entries: Vec<Group> = Vec::new();
         
-        for line in file_data.lines() {
+        for line in group_cntnt.lines() {
             if let Ok(group) = Group::parse(line) {
                 entries.push(group);
             }
@@ -661,15 +680,7 @@ impl AllGroups {
         for group in &self.groups {
             groupstring.push_str(&format!("{}\n", group.to_string().as_str()));
         }
-        let lockfile_name = format!("{}.lock", GROUP_FILE);
-        let mut options = OpenOptions::new();
-        options.truncate(true)
-            .write(true)
-            .create(true)
-            .custom_flags(O_EXCL as i32);
-        let mut file = options.open(&lockfile_name)?;
-        file.write(groupstring.as_bytes())?;
-        rename(lockfile_name, GROUP_FILE)?;
-        Ok(())
+        
+        write_locked_file(GROUP_FILE, groupstring)
     }
 }
