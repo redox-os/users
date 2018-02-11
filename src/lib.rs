@@ -5,17 +5,21 @@ extern crate syscall;
 #[macro_use] extern crate failure;
 
 use std::convert::From;
-use std::fs::File;
+use std::fs::OpenOptions;
 use std::io::Read;
+use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::process::CommandExt;
 use std::process::Command;
+use std::slice::{Iter, IterMut};
+use std::time::Duration;
+use std::thread::sleep;
 
 use argon2rs::verifier::Encoded;
 use argon2rs::{Argon2, Variant};
 use failure::Error;
 use syscall::call::{close, open, write};
 use syscall::Error as SyscallError;
-use syscall::flag::{O_CLOEXEC, O_EXLOCK, O_TRUNC, O_WRONLY};
+use syscall::flag::{O_CLOEXEC, O_EXLOCK, O_SHLOCK, O_TRUNC, O_WRONLY};
 use rand::os::OsRng;
 use rand::Rng;
 
@@ -26,6 +30,7 @@ const MIN_GID: usize = 1000;
 const MAX_GID: usize = 6000;
 const MIN_UID: usize = 1000;
 const MAX_UID: usize = 6000;
+const TIMEOUT: u64 = 3;
 
 pub type Result<T> = std::result::Result<T , Error>;
 
@@ -56,10 +61,12 @@ impl From<SyscallError> for UsersError {
     }
 }
 
-//TODO: Actually lock the file from writes (O_SHLOCK)
 fn read_locked_file(file: &str) -> Result<String> {
     let mut file_data = String::new();
-    let mut file = File::open(file)?;
+    let mut file = OpenOptions::new()
+        .read(true)
+        .custom_flags(O_SHLOCK as i32)
+        .open(file)?;
     file.read_to_string(&mut file_data)?;
     Ok(file_data)
 }
@@ -185,17 +192,21 @@ impl User {
         self.hash = "!".into();
     }
     
-    /// Verify the password. If the hash is empty, we override Argon's
-    /// default behavior and only allow login if the password field is
-    /// also empty.
+    /// Verify the password. If the hash is empty, we only
+    /// allow login if the password field is also empty.
+    /// Note that this is a blocking operation if the password
+    /// is incorrect.
     pub fn verify_passwd(&self, password: &str) -> bool {
-        if let Some(ref encoded) = self.encoded {
+        let verified = if let Some(ref encoded) = self.encoded {
             encoded.verify(password.as_bytes())
-        } else if self.hash == "" && password == "" {
-            true
         } else {
-            false
+            self.hash == "" && password == ""
+        };
+        
+        if !verified {
+            sleep(Duration::new(TIMEOUT, 0));
         }
+        verified
     }
     
     /// Determine if the hash for the password is blank
@@ -283,7 +294,7 @@ impl Group {
 
 impl ToString for Group {
     fn to_string(&self) -> String {
-        format!("{};{};{}", self.group, self.gid, self.users.join(","))
+        format!("{};{};{}", self.group, self.gid, self.users.join(",").trim_matches(','))
     }
 }
 
@@ -404,6 +415,16 @@ impl AllUsers {
         }
         
         Ok(AllUsers { users: entries })
+    }
+    
+    /// Get an iterator over all system groups
+    pub fn iter(&self) -> Iter<User> {
+        self.users.iter()
+    }
+    
+    /// Mutable version of `iter`
+    pub fn iter_mut(&mut self) -> IterMut<User> {
+        self.users.iter_mut()
     }
     
     /// Borrow the [`User`](struct.User.html) representing a user for a given username.
@@ -561,6 +582,16 @@ impl AllGroups {
         }
         
         Ok(AllGroups{ groups: entries })
+    }
+    
+    /// Get an iterator over all system groups
+    pub fn iter(&self) -> Iter<Group> {
+        self.groups.iter()
+    }
+    
+    /// Mutable version of `iter`
+    pub fn iter_mut(&mut self) -> IterMut<Group> {
+        self.groups.iter_mut()
     }
     
     /// Gets the [`Group`](struct.Group.html) for a given group name.
