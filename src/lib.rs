@@ -6,11 +6,13 @@ extern crate syscall;
 
 use std::convert::From;
 use std::fs::OpenOptions;
+use std::fmt::{self, Display};
 use std::io::Read;
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::process::CommandExt;
 use std::process::Command;
 use std::slice::{Iter, IterMut};
+use std::str::FromStr;
 use std::time::Duration;
 use std::thread::sleep;
 
@@ -132,36 +134,6 @@ pub struct User {
 }
 
 impl User {
-    //Parse a single entry from /etc/passwd
-    pub(crate) fn parse(line: &str) -> Result<User> {
-        let mut parts = line.split(';');
-
-        let user = parts.next().ok_or(parse_error("expected user"))?;
-        let hash = parts.next().ok_or(parse_error("expected hash"))?;
-        let uid = parts.next().ok_or(parse_error("expected uid"))?.parse::<usize>()?;
-        let gid = parts.next().ok_or(parse_error("expected uid"))?.parse::<usize>()?;
-        let name = parts.next().ok_or(parse_error("expected real name"))?;
-        let home = parts.next().ok_or(parse_error("expected home directory path"))?;
-        let shell = parts.next().ok_or(parse_error("expected shell path"))?;
-        
-        let encoded = match hash {
-            "" => None,
-            "!" => None,
-            _ => Some(Encoded::from_u8(hash.as_bytes())?)
-        };
-        
-        Ok(User {
-            user: user.into(),
-            hash: hash.into(),
-            encoded: encoded,
-            uid: uid,
-            gid: gid,
-            name: name.into(),
-            home: home.into(),
-            shell: shell.into()
-        })
-    }
-    
     /// Set the password for a user. Make sure the password you have
     /// received is actually what the user wants as their password.
     ///
@@ -173,25 +145,25 @@ impl User {
             let a2 = Argon2::new(10, 1, 4096, Variant::Argon2i)?;
             let salt = format!("{:X}", OsRng::new()?.next_u64());
             let enc = Encoded::new(a2, password.as_bytes(), salt.as_bytes(), &[], &[]);
-            
+
             hash = String::from_utf8(enc.to_u8())?;
             encoded = Some(enc);
         } else {
             hash = "".into();
             encoded = None;
         }
-        
+
         self.hash = hash;
         self.encoded = encoded;
         Ok(())
     }
-    
+
     /// Unset the password (do not allow logins)
     pub fn unset_passwd(&mut self) {
         self.encoded = None;
         self.hash = "!".into();
     }
-    
+
     /// Verify the password. If the hash is empty, we only
     /// allow login if the password field is also empty.
     /// Note that this is a blocking operation if the password
@@ -202,31 +174,31 @@ impl User {
         } else {
             self.hash == "" && password == ""
         };
-        
+
         if !verified {
             sleep(Duration::new(TIMEOUT, 0));
         }
         verified
     }
-    
+
     /// Determine if the hash for the password is blank
     /// (Any user can log in as this user with no password).
     pub fn is_passwd_blank(&self) -> bool {
         self.hash == ""
     }
-    
+
     /// Determine if the hash for the password is unset
     /// (No users can log in as this user, aka, must use sudo or su)
     pub fn is_passwd_unset(&self) -> bool {
         self.encoded.is_none() && self.hash != ""
     }
-    
+
     /// Get a Command to run the user's default shell
     /// (See [`login_cmd`](struct.User.html#method.login_cmd) for more doc)
     pub fn shell_cmd(&self) -> Command {
         self.login_cmd(&self.shell)
     }
-    
+
     /// Provide a login command for the user, which is any
     /// entry point for starting a user's session, whether
     /// a shell (use [`shell_cmd`](struct.User.html#method.shell_cmd) instead) or a graphical init.
@@ -256,9 +228,43 @@ impl User {
     }
 }
 
-impl ToString for User {
-    fn to_string(&self) -> String {
-        format!("{};{};{};{};{};{};{}", self.user, self.hash, self.uid, self.gid, self.name, self.home, self.shell)
+
+impl Display for User {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{};{};{};{};{};{};{}", self.user, self.hash, self.uid, self.gid, self.name, self.home, self.shell)
+    }
+}
+
+impl FromStr for User {
+    type Err = failure::Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        let mut parts = s.split(';');
+
+        let user = parts.next().ok_or(parse_error("expected user"))?;
+        let hash = parts.next().ok_or(parse_error("expected hash"))?;
+        let uid = parts.next().ok_or(parse_error("expected uid"))?.parse::<usize>()?;
+        let gid = parts.next().ok_or(parse_error("expected uid"))?.parse::<usize>()?;
+        let name = parts.next().ok_or(parse_error("expected real name"))?;
+        let home = parts.next().ok_or(parse_error("expected home directory path"))?;
+        let shell = parts.next().ok_or(parse_error("expected shell path"))?;
+
+        let encoded = match hash {
+            "" => None,
+            "!" => None,
+            _ => Some(Encoded::from_u8(hash.as_bytes())?)
+        };
+
+        Ok(User {
+            user: user.into(),
+            hash: hash.into(),
+            encoded: encoded,
+            uid: uid,
+            gid: gid,
+            name: name.into(),
+            home: home.into(),
+            shell: shell.into()
+        })
     }
 }
 
@@ -273,10 +279,17 @@ pub struct Group {
     pub users: Vec<String>,
 }
 
-impl Group {
-    //Parse a single entry from /etc/group
-    pub(crate) fn parse(line: &str) -> Result<Group> {
-        let mut parts = line.split(';');
+impl Display for Group {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{};{};{}", self.group, self.gid, self.users.join(",").trim_matches(','))
+    }
+}
+
+impl FromStr for Group {
+    type Err = failure::Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        let mut parts = s.split(';');
 
         let group = parts.next().ok_or(parse_error("expected group"))?;
         let gid = parts.next().ok_or(parse_error("expected gid"))?.parse::<usize>()?;
@@ -289,12 +302,6 @@ impl Group {
             gid: gid,
             users: users
         })
-    }
-}
-
-impl ToString for Group {
-    fn to_string(&self) -> String {
-        format!("{};{};{}", self.group, self.gid, self.users.join(",").trim_matches(','))
     }
 }
 
@@ -397,7 +404,7 @@ pub fn get_gid() -> Result<usize> {
 ///   functions.
 pub struct AllUsers {
     users: Vec<User>
-    
+
 }
 
 impl AllUsers {
@@ -405,28 +412,28 @@ impl AllUsers {
     //TODO: Indicate if parsing an individual line failed or not
     pub fn new() -> Result<AllUsers> {
         let passwd_cntnt = read_locked_file(PASSWD_FILE)?;
-        
+
         let mut entries: Vec<User> = Vec::new();
-        
+
         for line in passwd_cntnt.lines() {
-            if let Ok(user) = User::parse(line) {
+            if let Ok(user) = User::from_str(line) {
                 entries.push(user);
             }
         }
-        
+
         Ok(AllUsers { users: entries })
     }
-    
+
     /// Get an iterator over all system groups
     pub fn iter(&self) -> Iter<User> {
         self.users.iter()
     }
-    
+
     /// Mutable version of `iter`
     pub fn iter_mut(&mut self) -> IterMut<User> {
         self.users.iter_mut()
     }
-    
+
     /// Borrow the [`User`](struct.User.html) representing a user for a given username.
     ///
     /// # Examples
@@ -438,16 +445,16 @@ impl AllUsers {
     /// let user = users.get_user_by_id(1).unwrap();
     /// ```
     pub fn get_by_name<T: AsRef<str>>(&self, username: T) -> Option<&User> {
-        self.users.iter()
+        self.iter()
             .find(|user| user.user == username.as_ref())
     }
-    
+
     /// Mutable version of ['get_by_name'](struct.AllUsers.html#method.get_by_name)
     pub fn get_mut_by_name<T: AsRef<str>>(&mut self, username: T) -> Option<&mut User> {
-        self.users.iter_mut()
+        self.iter_mut()
             .find(|user| user.user == username.as_ref())
     }
-    
+
     /// Borrow the [`User`](struct.AllUsers.html) representing given user ID.
     ///
     /// # Examples
@@ -459,16 +466,16 @@ impl AllUsers {
     /// let user = users.get_user_by_id(1).unwrap();
     /// ```
     pub fn get_by_id(&self, uid: usize) -> Option<&User> {
-        self.users.iter()
+        self.iter()
             .find(|user| user.uid == uid)
     }
-    
+
     /// Mutable version of [`get_by_id`](struct.AllUsers.html#method.get_by_id)
     pub fn get_mut_by_id(&mut self, uid: usize) -> Option<&mut User> {
-        self.users.iter_mut()
+        self.iter_mut()
             .find(|user| user.uid == uid)
     }
-    
+
     /// Provides an unused user id, defined as "unused" by the system
     /// defaults, between 1000 and 6000
     ///
@@ -479,13 +486,13 @@ impl AllUsers {
     /// ```
     pub fn get_unique_id(&self) -> Option<usize> {
         for uid in MIN_UID..MAX_UID {
-            if !self.users.iter().any(|user| uid == user.uid) {
+            if !self.iter().any(|user| uid == user.uid) {
                 return Some(uid);
             }
         }
         None
     }
-    
+
     /// Adds a user with the specified attributes to the
     /// AllUsers instance. Note that the
     /// user's password is set unset during this call.
@@ -494,10 +501,10 @@ impl AllUsers {
     /// and users must therefore call [`save`](struct.AllUsers.html#method.save)
     /// in order for the new user to be applied to the system.
     pub fn add_user(&mut self, login: &str, uid: usize, gid: usize, name: &str, home: &str, shell: &str) -> Result<()> {
-        if self.users.iter().any(|user| user.user == login || user.uid == uid) {
+        if self.iter().any(|user| user.user == login || user.uid == uid) {
             return Err(From::from(UsersError::AlreadyExists))
         }
-        
+
         self.users.push(User{
             user: login.into(),
             hash: "!".into(),
@@ -510,36 +517,38 @@ impl AllUsers {
         });
         Ok(())
     }
-    
+
     /// Remove a user from the system. This is a mutating operation,
     /// and users of the crate must therefore call [`save`](struct.AllUsers.html#method.save)
     /// in order for changes to be applied to the system.
     pub fn remove_by_name(&mut self, name: String) -> Result<()> {
         self.remove(|user| user.user == name )
     }
-    
+
     /// User-id version of [`remove_by_name`](struct.AllUsers.html#method.remove_by_name)
     pub fn remove_by_id(&mut self, id: usize) -> Result<()> {
         self.remove(|user| user.uid == id )
     }
-    
+
     // Reduce code duplication
     fn remove<P>(&mut self, predicate: P) -> Result<()> where
         P: FnMut(&User) -> bool
     {
         let pos;
         {
-            let mut iter = self.users.iter();
+            let mut iter = self.iter();
             if let Some(posi) = iter.position(predicate) {
                 pos = posi;
             } else {
                 return Err(From::from(UsersError::NotFound));
             };
         }
+
         self.users.remove(pos);
+
         Ok(())
     }
-    
+
     /// Syncs the data stored in the AllUsers instance to the filesystem.
     /// To apply changes to the system from an AllUsers, you MUST call this function!
     /// This function currently does a bunch of fs I/O so it is error-prone.
@@ -548,8 +557,35 @@ impl AllUsers {
         for user in &self.users {
             userstring.push_str(&format!("{}\n", user.to_string().as_str()));
         }
-        
+
         write_locked_file(PASSWD_FILE, userstring)
+    }
+}
+
+impl IntoIterator for AllUsers {
+    type Item = User;
+    type IntoIter = ::std::vec::IntoIter<User>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.users.into_iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a AllUsers {
+    type Item = &'a User;
+    type IntoIter = ::std::slice::Iter<'a, User>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a mut AllUsers {
+    type Item = &'a mut User;
+    type IntoIter = ::std::slice::IterMut<'a, User>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter_mut()
     }
 }
 
@@ -564,6 +600,33 @@ pub struct AllGroups {
     groups: Vec<Group>
 }
 
+impl IntoIterator for AllGroups {
+    type Item = Group;
+    type IntoIter = ::std::vec::IntoIter<Group>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.groups.into_iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a AllGroups {
+    type Item = &'a Group;
+    type IntoIter = ::std::slice::Iter<'a, Group>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a mut AllGroups {
+    type Item = &'a mut Group;
+    type IntoIter = ::std::slice::IterMut<'a, Group>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter_mut()
+    }
+}
+
 //UNOPTIMIZED: Right now this struct is just a Vec and we are doing O(n)
 // operations over the vec to do the `get` methods. A multi-key
 // hashmap would be a godsend here for performance.
@@ -572,28 +635,28 @@ impl AllGroups {
     //TODO: Indicate if parsing an individual line failed or not
     pub fn new() -> Result<AllGroups> {
         let group_cntnt = read_locked_file(GROUP_FILE)?;
-        
+
         let mut entries: Vec<Group> = Vec::new();
-        
+
         for line in group_cntnt.lines() {
-            if let Ok(group) = Group::parse(line) {
+            if let Ok(group) = Group::from_str(line) {
                 entries.push(group);
             }
         }
-        
+
         Ok(AllGroups{ groups: entries })
     }
-    
+
     /// Get an iterator over all system groups
     pub fn iter(&self) -> Iter<Group> {
         self.groups.iter()
     }
-    
+
     /// Mutable version of `iter`
     pub fn iter_mut(&mut self) -> IterMut<Group> {
         self.groups.iter_mut()
     }
-    
+
     /// Gets the [`Group`](struct.Group.html) for a given group name.
     ///
     /// # Examples
@@ -605,16 +668,16 @@ impl AllGroups {
     /// let group = groups.get_group_by_name("wheel").unwrap();
     /// ```
     pub fn get_by_name<T: AsRef<str>>(&self, groupname: T) -> Option<&Group> {
-        self.groups.iter()
+        self.iter()
             .find(|group| group.group == groupname.as_ref())
     }
-    
+
     /// Mutable version of [`get_by_name`](struct.AllGroups.html#method.get_by_name)
     pub fn get_mut_by_name<T: AsRef<str>>(&mut self, groupname: T) -> Option<&mut Group> {
-        self.groups.iter_mut()
+        self.iter_mut()
             .find(|group| group.group == groupname.as_ref())
     }
-    
+
     /// Gets the [`Group`](struct.Group.html) for a given group ID.
     ///
     /// # Examples
@@ -626,16 +689,16 @@ impl AllGroups {
     /// let group = groups.get_group_by_id(1).unwrap();
     /// ```
     pub fn get_by_id(&self, gid: usize) -> Option<&Group> {
-        self.groups.iter()
+        self.iter()
             .find(|group| group.gid == gid)
     }
-    
+
     /// Mutable version of [`get_by_id`](struct.AllGroups.html#method.get_by_id)
     pub fn get_mut_by_id(&mut self, gid: usize) -> Option<&mut Group> {
-        self.groups.iter_mut()
+        self.iter_mut()
             .find(|group| group.gid == gid)
     }
-    
+
     /// Provides an unused group id, defined as "unused" by the system
     /// defaults, between 1000 and 6000
     ///
@@ -646,23 +709,23 @@ impl AllGroups {
     /// ```
     pub fn get_unique_id(&self) -> Option<usize> {
         for gid in MIN_GID..MAX_GID {
-            if !self.groups.iter().any(|group| gid == group.gid) {
+            if !self.iter().any(|group| gid == group.gid) {
                 return Some(gid);
             }
         }
         None
     }
-    
+
     /// Adds a group with the specified attributes to this AllGroups
     ///
     /// This function is classified as a mutating operation,
     /// and users must therefore call [`save`](struct.AllUsers.html#method.save)
     /// in order for the new group to be applied to the system.
     pub fn add_group(&mut self, name: &str, gid: usize, users: &[&str]) -> Result<()> {
-        if self.groups.iter().any(|group| group.group == name || group.gid == gid) {
+        if self.iter().any(|group| group.group == name || group.gid == gid) {
             return Err(From::from(UsersError::AlreadyExists))
         }
-        
+
         self.groups.push(Group {
             group: name.into(),
             gid: gid,
@@ -670,39 +733,41 @@ impl AllGroups {
             //Might be cleaner... Also breaks...
             //users: users.iter().map(String::to_string).collect()
         });
-        
+
         Ok(())
     }
-    
+
     /// Remove a group from the system. This is a mutating operation,
     /// and users of the crate must therefore call [`save`](struct.AllGroups.html#method.save)
     /// in order for changes to be applied to the system.
     pub fn remove_by_name(&mut self, name: String) -> Result<()> {
         self.remove(|group| group.group == name )
     }
-    
+
     /// Group-id version of [`remove_by_name`](struct.AllGroups.html#method.remove_by_name)
     pub fn remove_by_id(&mut self, id: usize) -> Result<()> {
         self.remove(|group| group.gid == id )
     }
-    
+
     // Reduce code duplication
     fn remove<P>(&mut self, predicate: P) -> Result<()> where
         P: FnMut(&Group) -> bool
     {
         let pos;
         {
-            let mut iter = self.groups.iter();
+            let mut iter = self.iter();
             if let Some(posi) = iter.position(predicate) {
                 pos = posi;
             } else {
                 return Err(From::from(UsersError::NotFound));
             };
         }
+
         self.groups.remove(pos);
+
         Ok(())
     }
-    
+
     /// Syncs the data stored in the AllGroups instance to the filesystem.
     /// To apply changes to the AllGroups, you MUST call this function.
     /// This function currently does a lot of fs I/O so it is error-prone.
@@ -711,7 +776,7 @@ impl AllGroups {
         for group in &self.groups {
             groupstring.push_str(&format!("{}\n", group.to_string().as_str()));
         }
-        
+
         write_locked_file(GROUP_FILE, groupstring)
     }
 }
