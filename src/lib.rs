@@ -15,6 +15,7 @@ use std::slice::{Iter, IterMut};
 use std::str::FromStr;
 use std::time::Duration;
 use std::thread::sleep;
+use std::iter::FromIterator;
 
 use argon2rs::verifier::Encoded;
 use argon2rs::{Argon2, Variant};
@@ -562,6 +563,18 @@ impl AllUsers {
     }
 }
 
+impl FromIterator<User> for AllUsers {
+    fn from_iter<I: IntoIterator<Item=User>>(iter: I) -> Self {
+        let mut entries = Vec::new();
+
+        for user in iter {
+            entries.push(user)
+        }
+
+        AllUsers { users: entries }
+    }
+}
+
 impl IntoIterator for AllUsers {
     type Item = User;
     type IntoIter = ::std::vec::IntoIter<User>;
@@ -778,5 +791,60 @@ impl AllGroups {
         }
 
         write_locked_file(GROUP_FILE, groupstring)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn create_all_users() -> AllUsers {
+        let mut root = User {
+            user: "root".into(),
+            hash: "".into(),
+            encoded: None,
+            uid: 0,
+            gid: 0,
+            name: "root".into(),
+            home: "/root".into(),
+            shell: "/bin/ion".into()
+        };
+        let mut user = User {
+            user: "user".into(),
+            hash: "".into(),
+            encoded: None,
+            uid: 0,
+            gid: 0,
+            name: "user".into(),
+            home: "/home/user".into(),
+            shell: "/bin/ion".into()
+        };
+
+        root.set_passwd("password");
+        user.set_passwd("");
+
+        let users = vec![root, user];
+
+        users.into_iter().collect()
+    }
+
+
+    #[test]
+    fn get_by_name_works() {
+        let mut expected_user = User {
+            user: "root".into(),
+            hash: "".into(),
+            encoded: None,
+            uid: 0,
+            gid: 0,
+            name: "root".into(),
+            home: "/root".into(),
+            shell: "/bin/ion".into()
+        };
+
+        expected_user.set_passwd("password");
+        let all_users = create_all_users();
+
+        assert_eq!(expected_user.gid, all_users.get_by_name("root").unwrap().gid);
     }
 }
