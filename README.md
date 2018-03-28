@@ -32,3 +32,9 @@ extern crate redox_users;
 ```
 
 And `redox_users` is now ready to roll!
+
+## Hashing
+redox_users uses the Argon2 hashing algorithm. The default hashing parameters are as follows:
+```Rust
+Argon2::new(10, 1, 4096, Variant::Argon2i)
+```

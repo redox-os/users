@@ -1,12 +1,12 @@
 extern crate argon2rs;
 extern crate rand;
-extern crate extra;
 extern crate syscall;
 #[macro_use] extern crate failure;
 
 use std::convert::From;
 use std::fs::OpenOptions;
-use std::io::Read;
+use std::io::{Read, Write};
+#[cfg(target_os="redox")]
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::process::CommandExt;
 use std::process::Command;
@@ -17,20 +17,28 @@ use std::thread::sleep;
 use argon2rs::verifier::Encoded;
 use argon2rs::{Argon2, Variant};
 use failure::Error;
-use syscall::call::{close, open, write};
 use syscall::Error as SyscallError;
-use syscall::flag::{O_CLOEXEC, O_EXLOCK, O_SHLOCK, O_TRUNC, O_WRONLY};
+#[cfg(target_os="redox")]
+use syscall::flag::{O_EXLOCK, O_SHLOCK};
 use rand::os::OsRng;
 use rand::Rng;
 
 //TODO: Allow a configuration file for all this someplace
+#[cfg(not(test))]
 const PASSWD_FILE: &'static str = "/etc/passwd";
+#[cfg(not(test))]
 const GROUP_FILE: &'static str = "/etc/group";
 const MIN_GID: usize = 1000;
 const MAX_GID: usize = 6000;
 const MIN_UID: usize = 1000;
 const MAX_UID: usize = 6000;
 const TIMEOUT: u64 = 3;
+
+// Testing values
+#[cfg(test)]
+const PASSWD_FILE: &'static str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/passwd");
+#[cfg(test)]
+const GROUP_FILE: &'static str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/group");
 
 pub type Result<T> = std::result::Result<T , Error>;
 
@@ -62,36 +70,43 @@ impl From<SyscallError> for UsersError {
 }
 
 fn read_locked_file(file: &str) -> Result<String> {
-    let mut file_data = String::new();
+    #[cfg(test)]
+    println!("Reading file: {}", file);
+    
+    #[cfg(target_os="redox")]
     let mut file = OpenOptions::new()
         .read(true)
         .custom_flags(O_SHLOCK as i32)
         .open(file)?;
+    #[cfg(target_os="linux")]
+    let mut file = OpenOptions::new()
+        .read(true)
+        .open(file)?;
+    
+    let len = file.metadata()?.len();
+    let mut file_data = String::with_capacity(len as usize);
     file.read_to_string(&mut file_data)?;
     Ok(file_data)
 }
 
 fn write_locked_file(file: &str, data: String) -> Result<()> {
-    let fd = match open(file, O_WRONLY | O_TRUNC | O_EXLOCK | O_CLOEXEC) {
-        Ok(fd) => fd,
-        Err(err) => return Err(os_error(&format!("{}: {}", err, file)).into())
-    };
-    match write(fd, data.as_bytes()) {
-        Ok(_bytes) => {
-            match close(fd) {
-                Ok(_) => (),
-                Err(err) => return Err(os_error(&format!("{}: {}", err, file)).into())
-            };
-            Ok(())
-        },
-        Err(err) => {
-            match close(fd) {
-                Ok(_) => (),
-                Err(err) => return Err(os_error(&format!("{}: {}", err, file)).into())
-            };
-            Err(os_error(&format!("{}: {}", err, file)).into())
-        }
-    }
+    #[cfg(test)]
+    println!("Reading file: {}", file);
+    
+    #[cfg(target_os="redox")]
+    let mut file = OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .custom_flags(O_EXLOCK as i32)
+        .open(file)?;
+    #[cfg(target_os="linux")]
+    let mut file = OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(file)?;
+    
+    file.write(data.as_bytes())?;
+    Ok(())
 }
 
 /// A struct representing a Redox user.
@@ -308,8 +323,8 @@ impl ToString for Group {
 /// Basic usage:
 ///
 /// ```
+/// # use redox_users::get_euid;
 /// let euid = get_euid().unwrap();
-///
 /// ```
 pub fn get_euid() -> Result<usize> {
     match syscall::geteuid() {
@@ -328,8 +343,8 @@ pub fn get_euid() -> Result<usize> {
 /// Basic usage:
 ///
 /// ```
+/// # use redox_users::get_uid;
 /// let uid = get_uid().unwrap();
-///
 /// ```
 pub fn get_uid() -> Result<usize> {
     match syscall::getuid() {
@@ -348,8 +363,8 @@ pub fn get_uid() -> Result<usize> {
 /// Basic usage:
 ///
 /// ```
+/// # use redox_users::get_egid;
 /// let egid = get_egid().unwrap();
-///
 /// ```
 pub fn get_egid() -> Result<usize> {
     match syscall::getegid() {
@@ -368,8 +383,8 @@ pub fn get_egid() -> Result<usize> {
 /// Basic usage:
 ///
 /// ```
+/// # use redox_users::get_gid;
 /// let gid = get_gid().unwrap();
-///
 /// ```
 pub fn get_gid() -> Result<usize> {
     match syscall::getgid() {
@@ -433,9 +448,10 @@ impl AllUsers {
     ///
     /// Basic usage:
     ///
-    /// ```
+    /// ```no_run
+    /// # use redox_users::AllUsers;
     /// let users = AllUsers::new().unwrap();
-    /// let user = users.get_user_by_id(1).unwrap();
+    /// let user = users.get_by_id(0).unwrap();
     /// ```
     pub fn get_by_name<T: AsRef<str>>(&self, username: T) -> Option<&User> {
         self.users.iter()
@@ -454,9 +470,10 @@ impl AllUsers {
     ///
     /// Basic usage:
     ///
-    /// ```
+    /// ```no_run
+    /// # use redox_users::AllUsers;
     /// let users = AllUsers::new().unwrap();
-    /// let user = users.get_user_by_id(1).unwrap();
+    /// let user = users.get_by_id(0).unwrap();
     /// ```
     pub fn get_by_id(&self, uid: usize) -> Option<&User> {
         self.users.iter()
@@ -473,9 +490,11 @@ impl AllUsers {
     /// defaults, between 1000 and 6000
     ///
     /// # Examples
+    ///
     /// ```
+    /// # use redox_users::AllUsers;
     /// let users = AllUsers::new().unwrap();
-    /// let uid = users.get_unique_user_id().expect("no available uid");
+    /// let uid = users.get_unique_id().expect("no available uid");
     /// ```
     pub fn get_unique_id(&self) -> Option<usize> {
         for uid in MIN_UID..MAX_UID {
@@ -600,9 +619,10 @@ impl AllGroups {
     ///
     /// Basic usage:
     ///
-    /// ```
+    /// ```no_run
+    /// # use redox_users::AllGroups;
     /// let groups = AllGroups::new().unwrap();
-    /// let group = groups.get_group_by_name("wheel").unwrap();
+    /// let group = groups.get_by_name("wheel").unwrap();
     /// ```
     pub fn get_by_name<T: AsRef<str>>(&self, groupname: T) -> Option<&Group> {
         self.groups.iter()
@@ -621,9 +641,10 @@ impl AllGroups {
     ///
     /// Basic usage:
     ///
-    /// ```
+    /// ```no_run
+    /// # use redox_users::AllGroups;
     /// let groups = AllGroups::new().unwrap();
-    /// let group = groups.get_group_by_id(1).unwrap();
+    /// let group = groups.get_by_id(1).unwrap();
     /// ```
     pub fn get_by_id(&self, gid: usize) -> Option<&Group> {
         self.groups.iter()
@@ -640,9 +661,11 @@ impl AllGroups {
     /// defaults, between 1000 and 6000
     ///
     /// # Examples
+    ///
     /// ```
+    /// # use redox_users::AllGroups;
     /// let groups = AllGroups::new().unwrap();
-    /// let gid = groups.get_unique_group_id().expect("no available gid");
+    /// let gid = groups.get_unique_id().expect("no available gid");
     /// ```
     pub fn get_unique_id(&self) -> Option<usize> {
         for gid in MIN_GID..MAX_GID {
@@ -713,5 +736,166 @@ impl AllGroups {
         }
         
         write_locked_file(GROUP_FILE, groupstring)
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use {AllGroups, AllUsers, GROUP_FILE, MAX_GID, MAX_UID, MIN_GID, MIN_UID, PASSWD_FILE, read_locked_file};
+    
+    fn get_test_all_users() -> AllUsers {
+        AllUsers::new().unwrap_or_else(|err| {
+            println!("{}", err);
+            panic!(err);
+        })
+    }
+    
+    #[test]
+    fn get_user() {
+        let users = get_test_all_users();
+        let root = users.get_by_id(0).unwrap();
+        assert_eq!(root.user,  "root".to_string());
+        assert_eq!(root.hash,  "$argon2i$m=4096,t=10,p=1$Tnc4UVV0N00$ML9LIOujd3nmAfkAwEcSTMPqakWUF0OUiLWrIy0nGLk".to_string());
+        assert_eq!(root.uid,   0);
+        assert_eq!(root.gid,   0);
+        assert_eq!(root.name,  "root".to_string());
+        assert_eq!(root.home,  "file:/root".to_string());
+        assert_eq!(root.shell, "file:/bin/ion".to_string());
+        match root.encoded {
+            Some(_) => (),
+            None => panic!("Expected encoded argon hash!")
+        }
+        
+        let user = users.get_by_name("user").unwrap();
+        assert_eq!(user.user,  "user".to_string());
+        assert_eq!(user.hash,  "".to_string());
+        assert_eq!(user.uid,   1000);
+        assert_eq!(user.gid,   1000);
+        assert_eq!(user.name,  "user".to_string());
+        assert_eq!(user.home,  "file:/home/user".to_string());
+        assert_eq!(user.shell, "file:/bin/ion".to_string());
+        match user.encoded {
+            Some(_) => panic!("Should not be an argon hash!"),
+            None => ()
+        }
+    }
+    
+    fn get_test_all_groups() -> AllGroups {
+        AllGroups::new().unwrap_or_else(|err| {
+            println!("{}", err);
+            panic!(err);
+        })
+    }
+    
+    #[test]
+    fn get_group() {
+        let groups = get_test_all_groups();
+        let user = groups.get_by_name("user").unwrap();
+        assert_eq!(user.group,  "user");
+        assert_eq!(user.gid,    1000);
+        assert_eq!(user.users,  vec!["user"]);
+        
+        let wheel = groups.get_by_id(1).unwrap();
+        assert_eq!(wheel.group, "wheel");
+        assert_eq!(wheel.gid,   1);
+        assert_eq!(wheel.users, vec!["user", "root"]);
+    }
+    
+    #[test]
+    fn get_unused_ids() {
+        let users = get_test_all_users();
+        let id = users.get_unique_id().unwrap();
+        if id < MIN_UID || id > MAX_UID {
+            panic!("User ID is not between allowed margins")
+        } else if let Some(_) = users.get_by_id(id) {
+            panic!("User ID is used!");
+        }
+        
+        let groups = get_test_all_groups();
+        let id = groups.get_unique_id().unwrap();
+        if id < MIN_GID || id > MAX_GID {
+            panic!("Group ID is not between allowed margins")
+        } else if let Some(_) = groups.get_by_id(id) {
+            panic!("Group ID is used!");
+        }
+    }
+    
+    #[test]
+    fn manip_user() {
+        let mut users = get_test_all_users();
+        // NOT testing `get_unique_id`
+        let id = 7099;
+        users.add_user("fb", id, id, "FooBar", "/home/foob", "/bin/zsh").unwrap();
+        //                                             weirdo ^^^^^^^^^ :P
+        users.save().unwrap();
+        let file_content = read_locked_file(PASSWD_FILE).unwrap();
+        assert_eq!(file_content, concat!(
+            "root;$argon2i$m=4096,t=10,p=1$Tnc4UVV0N00$ML9LIOujd3nmAfkAwEcSTMPqakWUF0OUiLWrIy0nGLk;0;0;root;file:/root;file:/bin/ion\n",
+            "user;;1000;1000;user;file:/home/user;file:/bin/ion\n",
+            "fb;!;7099;7099;FooBar;/home/foob;/bin/zsh\n"
+        ));
+        
+        
+        {
+            let fb = users.get_mut_by_name("fb").unwrap();
+            fb.shell = "/bin/fish".to_string(); // That's better
+        }
+        users.save().unwrap();
+        let file_content = read_locked_file(PASSWD_FILE).unwrap();
+        assert_eq!(file_content, concat!(
+            "root;$argon2i$m=4096,t=10,p=1$Tnc4UVV0N00$ML9LIOujd3nmAfkAwEcSTMPqakWUF0OUiLWrIy0nGLk;0;0;root;file:/root;file:/bin/ion\n",
+            "user;;1000;1000;user;file:/home/user;file:/bin/ion\n",
+            "fb;!;7099;7099;FooBar;/home/foob;/bin/fish\n"
+        ));
+        
+        
+        {
+            users.remove_by_id(id).unwrap();
+        }
+        users.save().unwrap();
+        let file_content = read_locked_file(PASSWD_FILE).unwrap();
+        assert_eq!(file_content, concat!(
+            "root;$argon2i$m=4096,t=10,p=1$Tnc4UVV0N00$ML9LIOujd3nmAfkAwEcSTMPqakWUF0OUiLWrIy0nGLk;0;0;root;file:/root;file:/bin/ion\n",
+            "user;;1000;1000;user;file:/home/user;file:/bin/ion\n"
+        ));
+    }
+    
+    #[test]
+    fn manip_group() {
+        let mut groups = get_test_all_groups();
+        // NOT testing `get_unique_id`
+        let id = 7099;
+        
+        groups.add_group("fb", id, &["fb"]).unwrap();
+        groups.save().unwrap();
+        let file_content = read_locked_file(GROUP_FILE).unwrap();
+        assert_eq!(file_content, concat!(
+            "root;0;root\n",
+            "user;1000;user\n",
+            "wheel;1;user,root\n",
+            "fb;7099;fb\n"
+        ));
+        
+        {
+            let fb = groups.get_mut_by_name("fb").unwrap();
+            fb.users.push("user".to_string());
+        }
+        groups.save().unwrap();
+        let file_content = read_locked_file(GROUP_FILE).unwrap();
+        assert_eq!(file_content, concat!(
+            "root;0;root\n",
+            "user;1000;user\n",
+            "wheel;1;user,root\n",
+            "fb;7099;fb,user\n"
+        ));
+        
+        groups.remove_by_id(id).unwrap();
+        groups.save().unwrap();
+        let file_content = read_locked_file(GROUP_FILE).unwrap();
+        assert_eq!(file_content, concat!(
+            "root;0;root\n",
+            "user;1000;user\n",
+            "wheel;1;user,root\n"
+        ));
     }
 }
