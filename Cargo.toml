@@ -6,6 +6,8 @@ description = "A Rust library to access Redox users and groups functionality"
 license = "MIT"
 repository = "https://github.com/redox-os/users"
 documentation = "https://docs.rs/redox_users"
+readme = "README.md"
+keywords = ["redox", "auth"]
 
 [dependencies]
 argon2rs = { version = "0.2", default-features = false }

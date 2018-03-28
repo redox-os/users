@@ -4,9 +4,13 @@ extern crate extra;
 extern crate syscall;
 #[macro_use] extern crate failure;
 
+/*
+#[cfg(test)]
+mod test;*/
+
 use std::convert::From;
 use std::fs::OpenOptions;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::process::CommandExt;
 use std::process::Command;
@@ -17,20 +21,27 @@ use std::thread::sleep;
 use argon2rs::verifier::Encoded;
 use argon2rs::{Argon2, Variant};
 use failure::Error;
-use syscall::call::{close, open, write};
 use syscall::Error as SyscallError;
-use syscall::flag::{O_CLOEXEC, O_EXLOCK, O_SHLOCK, O_TRUNC, O_WRONLY};
+use syscall::flag::{O_EXLOCK, O_SHLOCK};
 use rand::os::OsRng;
 use rand::Rng;
 
 //TODO: Allow a configuration file for all this someplace
+//#[cfg(not(test))]
 const PASSWD_FILE: &'static str = "/etc/passwd";
+//#[cfg(not(test))]
 const GROUP_FILE: &'static str = "/etc/group";
 const MIN_GID: usize = 1000;
 const MAX_GID: usize = 6000;
 const MIN_UID: usize = 1000;
 const MAX_UID: usize = 6000;
 const TIMEOUT: u64 = 3;
+
+/* Testing values
+#[cfg(test)]
+const PASSWD_FILE: &'static str = "../../tests/passwd";
+#[cfg(test)]
+const GROUP_FILE: &'static str = "../../tests/group";*/
 
 pub type Result<T> = std::result::Result<T , Error>;
 
@@ -62,36 +73,24 @@ impl From<SyscallError> for UsersError {
 }
 
 fn read_locked_file(file: &str) -> Result<String> {
-    let mut file_data = String::new();
     let mut file = OpenOptions::new()
         .read(true)
         .custom_flags(O_SHLOCK as i32)
         .open(file)?;
+    let len = file.metadata()?.len();
+    let mut file_data = String::with_capacity(len as usize);
     file.read_to_string(&mut file_data)?;
     Ok(file_data)
 }
 
 fn write_locked_file(file: &str, data: String) -> Result<()> {
-    let fd = match open(file, O_WRONLY | O_TRUNC | O_EXLOCK | O_CLOEXEC) {
-        Ok(fd) => fd,
-        Err(err) => return Err(os_error(&format!("{}: {}", err, file)).into())
-    };
-    match write(fd, data.as_bytes()) {
-        Ok(_bytes) => {
-            match close(fd) {
-                Ok(_) => (),
-                Err(err) => return Err(os_error(&format!("{}: {}", err, file)).into())
-            };
-            Ok(())
-        },
-        Err(err) => {
-            match close(fd) {
-                Ok(_) => (),
-                Err(err) => return Err(os_error(&format!("{}: {}", err, file)).into())
-            };
-            Err(os_error(&format!("{}: {}", err, file)).into())
-        }
-    }
+    let mut file = OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .custom_flags(O_EXLOCK as i32)
+        .open(file)?;
+    file.write(data.as_bytes())?;
+    Ok(())
 }
 
 /// A struct representing a Redox user.
@@ -308,8 +307,8 @@ impl ToString for Group {
 /// Basic usage:
 ///
 /// ```
+/// # use redox_users::get_euid;
 /// let euid = get_euid().unwrap();
-///
 /// ```
 pub fn get_euid() -> Result<usize> {
     match syscall::geteuid() {
@@ -328,8 +327,8 @@ pub fn get_euid() -> Result<usize> {
 /// Basic usage:
 ///
 /// ```
+/// # use redox_users::get_uid;
 /// let uid = get_uid().unwrap();
-///
 /// ```
 pub fn get_uid() -> Result<usize> {
     match syscall::getuid() {
@@ -348,8 +347,8 @@ pub fn get_uid() -> Result<usize> {
 /// Basic usage:
 ///
 /// ```
+/// # use redox_users::get_egid;
 /// let egid = get_egid().unwrap();
-///
 /// ```
 pub fn get_egid() -> Result<usize> {
     match syscall::getegid() {
@@ -368,8 +367,8 @@ pub fn get_egid() -> Result<usize> {
 /// Basic usage:
 ///
 /// ```
+/// # use redox_users::get_gid;
 /// let gid = get_gid().unwrap();
-///
 /// ```
 pub fn get_gid() -> Result<usize> {
     match syscall::getgid() {
@@ -433,9 +432,10 @@ impl AllUsers {
     ///
     /// Basic usage:
     ///
-    /// ```
+    /// ```no_run
+    /// # use redox_users::AllUsers;
     /// let users = AllUsers::new().unwrap();
-    /// let user = users.get_user_by_id(1).unwrap();
+    /// let user = users.get_by_id(0).unwrap();
     /// ```
     pub fn get_by_name<T: AsRef<str>>(&self, username: T) -> Option<&User> {
         self.users.iter()
@@ -454,9 +454,10 @@ impl AllUsers {
     ///
     /// Basic usage:
     ///
-    /// ```
+    /// ```no_run
+    /// # use redox_users::AllUsers;
     /// let users = AllUsers::new().unwrap();
-    /// let user = users.get_user_by_id(1).unwrap();
+    /// let user = users.get_by_id(0).unwrap();
     /// ```
     pub fn get_by_id(&self, uid: usize) -> Option<&User> {
         self.users.iter()
@@ -473,9 +474,11 @@ impl AllUsers {
     /// defaults, between 1000 and 6000
     ///
     /// # Examples
+    ///
     /// ```
+    /// # use redox_users::AllUsers;
     /// let users = AllUsers::new().unwrap();
-    /// let uid = users.get_unique_user_id().expect("no available uid");
+    /// let uid = users.get_unique_id().expect("no available uid");
     /// ```
     pub fn get_unique_id(&self) -> Option<usize> {
         for uid in MIN_UID..MAX_UID {
@@ -600,9 +603,10 @@ impl AllGroups {
     ///
     /// Basic usage:
     ///
-    /// ```
+    /// ```no_run
+    /// # use redox_users::AllGroups;
     /// let groups = AllGroups::new().unwrap();
-    /// let group = groups.get_group_by_name("wheel").unwrap();
+    /// let group = groups.get_by_name("wheel").unwrap();
     /// ```
     pub fn get_by_name<T: AsRef<str>>(&self, groupname: T) -> Option<&Group> {
         self.groups.iter()
@@ -621,9 +625,10 @@ impl AllGroups {
     ///
     /// Basic usage:
     ///
-    /// ```
+    /// ```no_run
+    /// # use redox_users::AllGroups;
     /// let groups = AllGroups::new().unwrap();
-    /// let group = groups.get_group_by_id(1).unwrap();
+    /// let group = groups.get_by_id(1).unwrap();
     /// ```
     pub fn get_by_id(&self, gid: usize) -> Option<&Group> {
         self.groups.iter()
@@ -640,9 +645,11 @@ impl AllGroups {
     /// defaults, between 1000 and 6000
     ///
     /// # Examples
+    ///
     /// ```
+    /// # use redox_users::AllGroups;
     /// let groups = AllGroups::new().unwrap();
-    /// let gid = groups.get_unique_group_id().expect("no available gid");
+    /// let gid = groups.get_unique_id().expect("no available gid");
     /// ```
     pub fn get_unique_id(&self) -> Option<usize> {
         for gid in MIN_GID..MAX_GID {
