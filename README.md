@@ -1,6 +1,6 @@
-# redox_users
+# redox_users <img src="https://img.shields.io/crates/v/redox_users.svg">
 
-Redox OS APIs for accessing users and groups information.
+Redox OS APIs for accessing users and groups information. [Documentation](https://docs.rs/redox_users/0.1.0/redox_users/)
 
 High level APIs for:
 
@@ -14,24 +14,7 @@ We recommend to use these APIs instead of directly manipulating the
 `/etc/group` and `/etc/passwd` as this is an implementation detail and
 might change in the future.
 
-## Using redox_users
-
-Make sure you have Rust nightly.
-
-Add `redox_users` to `Cargo.toml`:
-
-```toml
-[dependencies.redox_users]
-git = "https://github.com/redox-os/users.git"
-```
-
-then import it in your main file:
-
-```rust
-extern crate redox_users;
-```
-
-And `redox_users` is now ready to roll!
+Note that redox_users is an API designed only for use on Redox. It compiles on other platforms (for testing), but it will not work and might produce unexpected behavior.
 
 ## Hashing
 redox_users uses the Argon2 hashing algorithm. The default hashing parameters are as follows:

@@ -78,7 +78,7 @@ fn read_locked_file(file: &str) -> Result<String> {
         .read(true)
         .custom_flags(O_SHLOCK as i32)
         .open(file)?;
-    #[cfg(target_os="linux")]
+    #[cfg(not(target_os="redox"))]
     let mut file = OpenOptions::new()
         .read(true)
         .open(file)?;
@@ -99,7 +99,7 @@ fn write_locked_file(file: &str, data: String) -> Result<()> {
         .truncate(true)
         .custom_flags(O_EXLOCK as i32)
         .open(file)?;
-    #[cfg(target_os="linux")]
+    #[cfg(not(target_os="redox"))]
     let mut file = OpenOptions::new()
         .write(true)
         .truncate(true)
