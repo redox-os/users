@@ -32,6 +32,8 @@ use syscall::flag::{O_EXLOCK, O_SHLOCK};
 const PASSWD_FILE: &'static str = "/etc/passwd";
 #[cfg(not(test))]
 const GROUP_FILE: &'static str = "/etc/group";
+#[cfg(not(test))]
+const SHADOW_FILE: &'static str = "/etc/shadow";
 const MIN_GID: usize = 1000;
 const MAX_GID: usize = 6000;
 const MIN_UID: usize = 1000;
@@ -43,6 +45,8 @@ const TIMEOUT: u64 = 3;
 const PASSWD_FILE: &'static str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/passwd");
 #[cfg(test)]
 const GROUP_FILE: &'static str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/group");
+#[cfg(test)]
+const SHADOW_FILE: &'static str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/shadow");
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -138,10 +142,10 @@ fn write_locked_file(file: &str, data: String) -> Result<()> {
 pub struct User {
     /// Username (login name)
     pub user: String,
-    /// Hashed password
-    hash: String,
-    /// Argon2 Hashing session, stored to simplify API
-    encoded: Option<Encoded>,
+    /// Hashed password and Argon2 Hashing session, stored to simplify API
+    // The Outer Option<T> holds data if the user was populated with a hash
+    // The Option<Encoded> is if the hash is a valid Argon Hash
+    hash: Option<(String, Option<Encoded>)>,
     /// User id
     pub uid: usize,
     /// Group id
@@ -174,26 +178,29 @@ impl User {
             encoded = None;
         }
 
-        self.hash = hash;
-        self.encoded = encoded;
+        self.hash = Some((hash, encoded));
         Ok(())
     }
 
     /// Unset the password (do not allow logins)
     pub fn unset_passwd(&mut self) {
-        self.encoded = None;
-        self.hash = "!".into();
+        self.hash = Some(("!".into(), None));
     }
 
     /// Verify the password. If the hash is empty, we only
     /// allow login if the password field is also empty.
     /// Note that this is a blocking operation if the password
     /// is incorrect.
+    ///
     pub fn verify_passwd(&self, password: &str) -> bool {
-        let verified = if let Some(ref encoded) = self.encoded {
-            encoded.verify(password.as_bytes())
-        } else {
-            self.hash == "" && password == ""
+        let verified = match self.hash {
+            Some((ref hash, ref encoded)) =>
+                if let &Some(ref encoded) = encoded {
+                    encoded.verify(password.as_bytes())
+                } else {
+                    hash == "" && password == ""
+                },
+            None => panic!("Shadowfile not read!")
         };
 
         if !verified {
@@ -204,14 +211,22 @@ impl User {
 
     /// Determine if the hash for the password is blank
     /// (Any user can log in as this user with no password).
+    /// Panics if the hash is not populated
     pub fn is_passwd_blank(&self) -> bool {
-        self.hash == ""
+        match self.hash {
+            Some((ref hash, ref encoded)) => hash == "" && encoded.is_none(),
+            None => panic!("Shadowfile not read!")
+        }
     }
 
     /// Determine if the hash for the password is unset
     /// (No users can log in as this user, aka, must use sudo or su)
+    /// Panics if the hash is not populated
     pub fn is_passwd_unset(&self) -> bool {
-        self.encoded.is_none() && self.hash != ""
+        match self.hash {
+            Some((ref hash, ref encoded)) => hash != "" && encoded.is_none(),
+            None => panic!("Shadowfile not read!")
+        }
     }
 
     /// Get a Command to run the user's default shell
@@ -247,13 +262,34 @@ impl User {
                .env("SHELL", &self.shell);
         command
     }
+    
+    /// This returns an entry for `/etc/shadow`
+    fn shadowstring(&self) -> String {
+        let hashstring = match self.hash {
+            Some((ref hash, _)) => hash,
+            None => panic!("Shadowfile not read!")
+        };
+        format!("{};{}", self.user, hashstring)
+    }
+    
+    /// Give this a hash string (not a shadowfile entry!!!)
+    fn populate_hash(&mut self, hash: &str) -> Result<()> {
+        let encoded = match hash {
+            "" => None,
+            "!" => None,
+            _ => Some(Encoded::from_u8(hash.as_bytes())?)
+        };
+        self.hash = Some((hash.to_string(), encoded));
+        Ok(())
+    }
 }
 
 impl Display for User {
+    /// This returns an entry for `/etc/passwd`
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         #[cfg_attr(rustfmt, rustfmt_skip)]
-        write!(f, "{};{};{};{};{};{};{}",
-            self.user, self.hash, self.uid, self.gid, self.name, self.home, self.shell
+        write!(f, "{};{};{};{};{};{}",
+            self.user, self.uid, self.gid, self.name, self.home, self.shell
         )
     }
 }
@@ -265,7 +301,7 @@ impl FromStr for User {
         let mut parts = s.split(';');
 
         let user = parts.next().ok_or(parse_error("expected user"))?;
-        let hash = parts.next().ok_or(parse_error("expected hash"))?;
+        //let hash = parts.next().ok_or(parse_error("expected hash"))?;
         let uid = parts.next()
                        .ok_or(parse_error("expected uid"))?
                        .parse::<usize>()?;
@@ -276,15 +312,8 @@ impl FromStr for User {
         let home = parts.next().ok_or(parse_error("expected home dir path"))?;
         let shell = parts.next().ok_or(parse_error("expected shell path"))?;
 
-        let encoded = match hash {
-            "" => None,
-            "!" => None,
-            _ => Some(Encoded::from_u8(hash.as_bytes())?)
-        };
-
         Ok(User { user: user.into(),
-                  hash: hash.into(),
-                  encoded: encoded,
+                  hash: None,
                   uid: uid,
                   gid: gid,
                   name: name.into(),
@@ -433,24 +462,36 @@ pub fn get_gid() -> Result<usize> {
 ///   and [`get_mut_by_name`](struct.AllUsers.html#method.get_mut_by_name)
 ///   functions.
 pub struct AllUsers {
-    users: Vec<User>
+    users: Vec<User>,
+    is_auth_required: bool
 }
 
 impl AllUsers {
     /// Create a new AllUsers
+    /// Pass `true` if you need to authenticate a password, else, `false`
     //TODO: Indicate if parsing an individual line failed or not
-    pub fn new() -> Result<AllUsers> {
+    pub fn new(is_auth_required: bool) -> Result<AllUsers> {
         let passwd_cntnt = read_locked_file(PASSWD_FILE)?;
-
-        let mut entries: Vec<User> = Vec::new();
-
+        
+        let mut passwd_entries: Vec<User> = Vec::new();
         for line in passwd_cntnt.lines() {
             if let Ok(user) = User::from_str(line) {
-                entries.push(user);
+                passwd_entries.push(user);
+            }
+        }
+        
+        if is_auth_required {
+            let shadow_cntnt = read_locked_file(SHADOW_FILE)?;
+            let shadow_entries: Vec<&str> = shadow_cntnt.lines().collect();
+            for entry in shadow_entries.iter() {
+                let mut entry = entry.split(';');
+                let name = entry.next().ok_or(parse_error("error parsing shadowfile: expected username"))?;
+                let hash = entry.next().ok_or(parse_error("error parsing shadowfile: expected hash"))?;
+                passwd_entries.iter_mut().find(|user| user.user == name).ok_or(parse_error("error parsing shadowfile: unkown user"))?.populate_hash(hash)?;
             }
         }
 
-        Ok(AllUsers { users: entries })
+        Ok(AllUsers { users: passwd_entries, is_auth_required: is_auth_required })
     }
 
     /// Get an iterator over all system groups
@@ -471,7 +512,7 @@ impl AllUsers {
     ///
     /// ```no_run
     /// # use redox_users::AllUsers;
-    /// let users = AllUsers::new().unwrap();
+    /// let users = AllUsers::new(false).unwrap();
     /// let user = users.get_by_id(0).unwrap();
     /// ```
     pub fn get_by_name<T: AsRef<str>>(&self, username: T) -> Option<&User> {
@@ -491,7 +532,7 @@ impl AllUsers {
     ///
     /// ```no_run
     /// # use redox_users::AllUsers;
-    /// let users = AllUsers::new().unwrap();
+    /// let users = AllUsers::new(false).unwrap();
     /// let user = users.get_by_id(0).unwrap();
     /// ```
     pub fn get_by_id(&self, uid: usize) -> Option<&User> {
@@ -510,7 +551,7 @@ impl AllUsers {
     ///
     /// ```
     /// # use redox_users::AllUsers;
-    /// let users = AllUsers::new().unwrap();
+    /// let users = AllUsers::new(false).unwrap();
     /// let uid = users.get_unique_id().expect("no available uid");
     /// ```
     pub fn get_unique_id(&self) -> Option<usize> {
@@ -540,10 +581,13 @@ impl AllUsers {
         if self.iter().any(|user| user.user == login || user.uid == uid) {
             return Err(From::from(UsersError::AlreadyExists));
         }
+        
+        if !self.is_auth_required {
+            panic!("Attempt to create user without access to the shadowfile");
+        }
 
         self.users.push(User { user: login.into(),
-                               hash: "!".into(),
-                               encoded: None,
+                               hash: Some(("!".into(), None)),
                                uid: uid,
                                gid: gid,
                                name: name.into(),
@@ -588,11 +632,19 @@ impl AllUsers {
     /// This function currently does a bunch of fs I/O so it is error-prone.
     pub fn save(&self) -> Result<()> {
         let mut userstring = String::new();
+        let mut shadowstring = String::new();
         for user in &self.users {
             userstring.push_str(&format!("{}\n", user.to_string().as_str()));
+            if self.is_auth_required {
+                shadowstring.push_str(&format!("{}\n", user.shadowstring()));
+            }
         }
-
-        write_locked_file(PASSWD_FILE, userstring)
+        
+        write_locked_file(PASSWD_FILE, userstring)?;
+        if self.is_auth_required {
+            write_locked_file(SHADOW_FILE, shadowstring)?;
+        }
+        Ok(())
     }
 }
 
@@ -604,7 +656,7 @@ impl FromIterator<User> for AllUsers {
             entries.push(user)
         }
 
-        AllUsers { users: entries }
+        AllUsers { users: entries, is_auth_required: false }
     }
 }
 
@@ -832,41 +884,50 @@ impl AllGroups {
 mod test {
     use super::*;
 
-    fn get_test_all_users() -> AllUsers {
-        AllUsers::new().unwrap_or_else(|err| {
-            println!("{}", err);
-            panic!(err);
-        })
-    }
-
     #[test]
     fn get_user() {
-        let users = get_test_all_users();
+        let users = AllUsers::new(true).unwrap();
         let root = users.get_by_id(0).unwrap();
         assert_eq!(root.user,  "root".to_string());
-        assert_eq!(root.hash,
-            "$argon2i$m=4096,t=10,p=1$Tnc4UVV0N00$ML9LIOujd3nmAfkAwEcSTMPqakWUF0OUiLWrIy0nGLk".to_string());
+        let &(ref hashstring, ref encoded) = root.hash.as_ref().unwrap();
+        assert_eq!(hashstring,
+            &"$argon2i$m=4096,t=10,p=1$Tnc4UVV0N00$ML9LIOujd3nmAfkAwEcSTMPqakWUF0OUiLWrIy0nGLk".to_string());
         assert_eq!(root.uid,   0);
         assert_eq!(root.gid,   0);
         assert_eq!(root.name,  "root".to_string());
         assert_eq!(root.home,  "file:/root".to_string());
         assert_eq!(root.shell, "file:/bin/ion".to_string());
-        match root.encoded {
-            Some(_) => (),
-            None => panic!("Expected encoded argon hash!")
+        match encoded {
+            &Some(_) => (),
+            &None => panic!("Expected encoded argon hash!")
         }
 
         let user = users.get_by_name("user").unwrap();
         assert_eq!(user.user,  "user".to_string());
-        assert_eq!(user.hash,  "".to_string());
+        let &(ref hashstring, ref encoded) = user.hash.as_ref().unwrap();
+        assert_eq!(hashstring,  &"".to_string());
         assert_eq!(user.uid,   1000);
         assert_eq!(user.gid,   1000);
         assert_eq!(user.name,  "user".to_string());
         assert_eq!(user.home,  "file:/home/user".to_string());
         assert_eq!(user.shell, "file:/bin/ion".to_string());
-        match user.encoded {
-            Some(_) => panic!("Should not be an argon hash!"),
-            None => ()
+        match encoded {
+            &Some(_) => panic!("Should not be an argon hash!"),
+            &None => ()
+        }
+        
+        let li = users.get_by_name("li").unwrap();
+        assert_eq!(li.user, "li");
+        let &(ref hashstring, ref encoded) = li.hash.as_ref().unwrap();
+        assert_eq!(hashstring,  &"!".to_string());
+        assert_eq!(li.uid,   1007);
+        assert_eq!(li.gid,   1007);
+        assert_eq!(li.name,  "Lorem".to_string());
+        assert_eq!(li.home,  "file:/home/lorem".to_string());
+        assert_eq!(li.shell, "file:/bin/ion".to_string());
+        match encoded {
+            &Some(_) => panic!("Should not be an argon hash!"),
+            &None => ()
         }
     }
 
@@ -893,7 +954,7 @@ mod test {
 
     #[test]
     fn get_unused_ids() {
-        let users = get_test_all_users();
+        let users = AllUsers::new(false).unwrap_or_else(|err| panic!(err) );
         let id = users.get_unique_id().unwrap();
         if id < MIN_UID || id > MAX_UID {
             panic!("User ID is not between allowed margins")
@@ -912,29 +973,46 @@ mod test {
 
     #[test]
     fn manip_user() {
-        let mut users = get_test_all_users();
+        let mut users = AllUsers::new(true).unwrap();
         // NOT testing `get_unique_id`
         let id = 7099;
         users.add_user("fb", id, id, "FooBar", "/home/foob", "/bin/zsh").unwrap();
         //                                             weirdo ^^^^^^^^^ :P
         users.save().unwrap();
-        let file_content = read_locked_file(PASSWD_FILE).unwrap();
-        assert_eq!(file_content, concat!(
-            "root;$argon2i$m=4096,t=10,p=1$Tnc4UVV0N00$ML9LIOujd3nmAfkAwEcSTMPqakWUF0OUiLWrIy0nGLk;0;0;root;file:/root;file:/bin/ion\n",
-            "user;;1000;1000;user;file:/home/user;file:/bin/ion\n",
-            "fb;!;7099;7099;FooBar;/home/foob;/bin/zsh\n"
+        let p_file_content = read_locked_file(PASSWD_FILE).unwrap();
+        assert_eq!(p_file_content, concat!(
+            "root;0;0;root;file:/root;file:/bin/ion\n",
+            "user;1000;1000;user;file:/home/user;file:/bin/ion\n",
+            "li;1007;1007;Lorem;file:/home/lorem;file:/bin/ion\n",
+            "fb;7099;7099;FooBar;/home/foob;/bin/zsh\n"
+        ));
+        let s_file_content = read_locked_file(SHADOW_FILE).unwrap();
+        assert_eq!(s_file_content, concat!(
+            "root;$argon2i$m=4096,t=10,p=1$Tnc4UVV0N00$ML9LIOujd3nmAfkAwEcSTMPqakWUF0OUiLWrIy0nGLk\n",
+            "user;\n",
+            "li;!\n",
+            "fb;!\n"
         ));
 
         {
             let fb = users.get_mut_by_name("fb").unwrap();
             fb.shell = "/bin/fish".to_string(); // That's better
+            fb.set_passwd("").unwrap();
         }
         users.save().unwrap();
-        let file_content = read_locked_file(PASSWD_FILE).unwrap();
-        assert_eq!(file_content, concat!(
-            "root;$argon2i$m=4096,t=10,p=1$Tnc4UVV0N00$ML9LIOujd3nmAfkAwEcSTMPqakWUF0OUiLWrIy0nGLk;0;0;root;file:/root;file:/bin/ion\n",
-            "user;;1000;1000;user;file:/home/user;file:/bin/ion\n",
-            "fb;!;7099;7099;FooBar;/home/foob;/bin/fish\n"
+        let p_file_content = read_locked_file(PASSWD_FILE).unwrap();
+        assert_eq!(p_file_content, concat!(
+            "root;0;0;root;file:/root;file:/bin/ion\n",
+            "user;1000;1000;user;file:/home/user;file:/bin/ion\n",
+            "li;1007;1007;Lorem;file:/home/lorem;file:/bin/ion\n",
+            "fb;7099;7099;FooBar;/home/foob;/bin/fish\n"
+        ));
+        let s_file_content = read_locked_file(SHADOW_FILE).unwrap();
+        assert_eq!(s_file_content, concat!(
+            "root;$argon2i$m=4096,t=10,p=1$Tnc4UVV0N00$ML9LIOujd3nmAfkAwEcSTMPqakWUF0OUiLWrIy0nGLk\n",
+            "user;\n",
+            "li;!\n",
+            "fb;\n"
         ));
 
         {
@@ -943,8 +1021,9 @@ mod test {
         users.save().unwrap();
         let file_content = read_locked_file(PASSWD_FILE).unwrap();
         assert_eq!(file_content, concat!(
-            "root;$argon2i$m=4096,t=10,p=1$Tnc4UVV0N00$ML9LIOujd3nmAfkAwEcSTMPqakWUF0OUiLWrIy0nGLk;0;0;root;file:/root;file:/bin/ion\n",
-            "user;;1000;1000;user;file:/home/user;file:/bin/ion\n"
+            "root;0;0;root;file:/root;file:/bin/ion\n",
+            "user;1000;1000;user;file:/home/user;file:/bin/ion\n",
+            "li;1007;1007;Lorem;file:/home/lorem;file:/bin/ion\n"
         ));
     }
 
@@ -961,6 +1040,7 @@ mod test {
             "root;0;root\n",
             "user;1000;user\n",
             "wheel;1;user,root\n",
+            "li;1007;li\n",
             "fb;7099;fb\n"
         ));
 
@@ -974,6 +1054,7 @@ mod test {
             "root;0;root\n",
             "user;1000;user\n",
             "wheel;1;user,root\n",
+            "li;1007;li\n",
             "fb;7099;fb,user\n"
         ));
 
@@ -983,7 +1064,8 @@ mod test {
         assert_eq!(file_content, concat!(
             "root;0;root\n",
             "user;1000;user\n",
-            "wheel;1;user,root\n"
+            "wheel;1;user,root\n",
+            "li;1007;li\n"
         ));
     }
 
@@ -992,8 +1074,7 @@ mod test {
     fn create_all_users() -> AllUsers {
         let mut root = User {
             user: "root".into(),
-            hash: "".into(),
-            encoded: None,
+            hash: Some(("".into(), None)),
             uid: 0,
             gid: 0,
             name: "root".into(),
@@ -1002,8 +1083,7 @@ mod test {
         };
         let mut user = User {
             user: "user".into(),
-            hash: "".into(),
-            encoded: None,
+            hash: Some(("".into(), None)),
             uid: 0,
             gid: 0,
             name: "user".into(),
@@ -1023,8 +1103,7 @@ mod test {
     fn get_by_name_works() {
         let mut expected_user = User {
             user: "root".into(),
-            hash: "".into(),
-            encoded: None,
+            hash: Some(("".into(), None)),
             uid: 0,
             gid: 0,
             name: "root".into(),
