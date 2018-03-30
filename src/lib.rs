@@ -201,8 +201,10 @@ impl User {
     /// # Panics
     /// If the User's hash fields are unpopulated, this function will panic
     /// (see [`AllUsers`](struct.AllUsers.html#shadowfile-handling) for more info)
-    pub fn set_passwd(&mut self, password: &str) -> Result<()> {
+    pub fn set_passwd<T>(&mut self, password: T) -> Result<()>
+    where T: AsRef<str> {
         self.panic_if_unpopulated();
+        let password = password.as_ref();
 
         self.hash = if password != "" {
             let a2 = Argon2::new(10, 1, 4096, Variant::Argon2i)?;
@@ -240,10 +242,12 @@ impl User {
     /// # Panics
     /// If the User's hash fields are unpopulated, this function will panic
     /// (see [`AllUsers`](struct.AllUsers.html#shadowfile-handling) for more info)
-    pub fn verify_passwd(&self, password: &str) -> bool {
+    pub fn verify_passwd<T>(&self, password: T) -> bool
+    where T: AsRef<str> {
         self.panic_if_unpopulated();
         // Safe because it will have panicked already if self.hash.is_none()
         let &(ref hash, ref encoded) = self.hash.as_ref().unwrap();
+        let password = password.as_ref();
 
         let verified = if let &Some(ref encoded) = encoded {
             encoded.verify(password.as_bytes())
@@ -298,8 +302,8 @@ impl User {
     ///    - `GROUPS` set the user's `gid` field.
     ///    - `HOME` set to the user's `home` field.
     ///    - `SHELL` set to the user's `shell` field.
-    pub fn login_cmd<T: AsRef<str>>(&self, cmd: T) -> Command
-    where T: std::convert::AsRef<std::ffi::OsStr> {
+    pub fn login_cmd<T>(&self, cmd: T) -> Command
+    where T: std::convert::AsRef<std::ffi::OsStr> + AsRef<str> {
         let mut command = Command::new(cmd);
         command
             .uid(self.uid as u32)
@@ -711,8 +715,9 @@ impl AllUsers {
     /// Remove a user from the system. This is a mutating operation,
     /// and users of the crate must therefore call [`save`](struct.AllUsers.html#method.save)
     /// in order for changes to be applied to the system.
-    pub fn remove_by_name(&mut self, name: String) -> Result<()> {
-        self.remove(|user| user.user == name)
+    pub fn remove_by_name<T>(&mut self, name: T) -> Result<()>
+    where T: AsRef<str> {
+        self.remove(|user| user.user == name.as_ref())
     }
 
     /// User-id version of [`remove_by_name`](struct.AllUsers.html#method.remove_by_name)
@@ -956,8 +961,9 @@ impl AllGroups {
     /// Remove a group from the system. This is a mutating operation,
     /// and users of the crate must therefore call [`save`](struct.AllGroups.html#method.save)
     /// in order for changes to be applied to the system.
-    pub fn remove_by_name(&mut self, name: String) -> Result<()> {
-        self.remove(|group| group.group == name)
+    pub fn remove_by_name<T>(&mut self, name: T) -> Result<()>
+    where T: AsRef<str> {
+        self.remove(|group| group.group == name.as_ref())
     }
 
     /// Group-id version of [`remove_by_name`](struct.AllGroups.html#method.remove_by_name)
