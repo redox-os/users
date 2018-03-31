@@ -1047,6 +1047,40 @@ mod test {
         user.is_passwd_unset();
     }
 
+    #[test]
+    fn attempt_User_api() {
+        let mut users = AllUsers::new(true).unwrap();
+        let user = users.get_mut_by_id(1000).unwrap();
+
+        assert_eq!(user.is_passwd_blank(), true);
+        assert_eq!(user.is_passwd_unset(), false);
+        assert_eq!(user.verify_passwd(""), true);
+        assert_eq!(user.verify_passwd("Something"), false);
+
+        user.set_passwd("hi,i_am_passwd").unwrap();
+
+        assert_eq!(user.is_passwd_blank(), false);
+        assert_eq!(user.is_passwd_unset(), false);
+        assert_eq!(user.verify_passwd(""), false);
+        assert_eq!(user.verify_passwd("Something"), false);
+        assert_eq!(user.verify_passwd("hi,i_am_passwd"), true);
+
+        user.unset_passwd();
+
+        assert_eq!(user.is_passwd_blank(), false);
+        assert_eq!(user.is_passwd_unset(), true);
+        assert_eq!(user.verify_passwd(""), false);
+        assert_eq!(user.verify_passwd("Something"), false);
+        assert_eq!(user.verify_passwd("hi,i_am_passwd"), false);
+
+        user.set_passwd("").unwrap();
+
+        assert_eq!(user.is_passwd_blank(), true);
+        assert_eq!(user.is_passwd_unset(), false);
+        assert_eq!(user.verify_passwd(""), true);
+        assert_eq!(user.verify_passwd("Something"), false);
+    }
+
     // *** struct.AllUsers ***
     #[test]
     fn get_user() {
