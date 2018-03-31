@@ -14,3 +14,6 @@ argon2rs = { version = "0.2", default-features = false }
 rand = "0.4"
 redox_syscall = "0.1"
 failure = "0.1.1"
+
+[target.'cfg(not(target_os = "redox-os"))'.dependencies]
+fs2 = "0.4.3"
