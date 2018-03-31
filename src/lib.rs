@@ -31,8 +31,6 @@ extern crate rand;
 extern crate syscall;
 #[macro_use]
 extern crate failure;
-#[cfg(not(target_os = "redox"))]
-extern crate fs2;
 
 use std::convert::From;
 use std::fmt::{self, Display};
@@ -56,8 +54,6 @@ use rand::os::OsRng;
 use syscall::Error as SyscallError;
 #[cfg(target_os = "redox")]
 use syscall::flag::{O_EXLOCK, O_SHLOCK};
-#[cfg(not(target_os = "redox"))]
-use fs2::FileExt;
 
 //TODO: Allow a configuration file for all this someplace
 #[cfg(not(test))]
@@ -134,8 +130,6 @@ fn read_locked_file(file: &str) -> Result<String> {
     let mut file = OpenOptions::new()
         .read(true)
         .open(file)?;
-    #[cfg(not(target_os = "redox"))]
-    file.lock_shared()?;
 
     let len = file.metadata()?.len();
     let mut file_data = String::with_capacity(len as usize);
@@ -159,8 +153,6 @@ fn write_locked_file(file: &str, data: String) -> Result<()> {
         .write(true)
         .truncate(true)
         .open(file)?;
-    #[cfg(not(target_os = "redox"))]
-    file.lock_exclusive()?;
 
     file.write(data.as_bytes())?;
     Ok(())
@@ -1056,7 +1048,7 @@ mod test {
     }
 
     #[test]
-    fn attempt_User_api() {
+    fn attempt_user_api() {
         let mut users = AllUsers::new(true).unwrap();
         let user = users.get_mut_by_id(1000).unwrap();
 
