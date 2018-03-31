@@ -1,4 +1,4 @@
-# redox_users <a href="https://crates.io/crates/redox_users"><img src="https://img.shields.io/crates/v/redox_users.svg"></a>
+# redox_users <a href="https://travis-ci.org/redox-os/users"><img src="https://travis-ci.org/redox-os/users.svg?branch=master"></a> <a href="https://crates.io/crates/redox_users"><img src="https://img.shields.io/crates/v/redox_users.svg"></a>
 
 Redox OS APIs for accessing users and groups information. [Documentation](https://docs.rs/redox_users/0.1.0/redox_users/)
 
