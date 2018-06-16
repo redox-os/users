@@ -36,7 +36,6 @@ use std::convert::From;
 use std::fmt::{self, Display};
 use std::fs::OpenOptions;
 use std::io::{Read, Write};
-use std::iter::FromIterator;
 #[cfg(target_os = "redox")]
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::process::CommandExt;
@@ -764,45 +763,6 @@ impl AllUsers {
     }
 }
 
-impl FromIterator<User> for AllUsers {
-    fn from_iter<I: IntoIterator<Item = User>>(iter: I) -> Self {
-        let mut entries = Vec::new();
-
-        for user in iter {
-            entries.push(user)
-        }
-
-        AllUsers {
-            users: entries,
-            is_auth_required: false
-        }
-    }
-}
-
-impl IntoIterator for AllUsers {
-    type Item = User;
-    /// An iterator over all users on the system
-    type IntoIter = ::std::vec::IntoIter<User>;
-
-    fn into_iter(self) -> Self::IntoIter { self.users.into_iter() }
-}
-
-impl<'a> IntoIterator for &'a AllUsers {
-    type Item = &'a User;
-    /// An iterator over all users on the system
-    type IntoIter = ::std::slice::Iter<'a, User>;
-
-    fn into_iter(self) -> Self::IntoIter { self.iter() }
-}
-
-impl<'a> IntoIterator for &'a mut AllUsers {
-    type Item = &'a mut User;
-    /// An iterator over all users on the system
-    type IntoIter = ::std::slice::IterMut<'a, User>;
-
-    fn into_iter(self) -> Self::IntoIter { self.iter_mut() }
-}
-
 /// Struct encapsulating all the groups on the system
 ///
 /// [`AllGroups`](struct.AllGroups.html) is a struct that provides
@@ -812,27 +772,6 @@ impl<'a> IntoIterator for &'a mut AllUsers {
 /// [`AllUsers`](struct.AllUsers.html).
 pub struct AllGroups {
     groups: Vec<Group>
-}
-
-impl IntoIterator for AllGroups {
-    type Item = Group;
-    type IntoIter = ::std::vec::IntoIter<Group>;
-
-    fn into_iter(self) -> Self::IntoIter { self.groups.into_iter() }
-}
-
-impl<'a> IntoIterator for &'a AllGroups {
-    type Item = &'a Group;
-    type IntoIter = ::std::slice::Iter<'a, Group>;
-
-    fn into_iter(self) -> Self::IntoIter { self.iter() }
-}
-
-impl<'a> IntoIterator for &'a mut AllGroups {
-    type Item = &'a mut Group;
-    type IntoIter = ::std::slice::IterMut<'a, Group>;
-
-    fn into_iter(self) -> Self::IntoIter { self.iter_mut() }
 }
 
 //UNOPTIMIZED: Right now this struct is just a Vec and we are doing O(n)
@@ -1279,56 +1218,5 @@ mod test {
         } else if let Some(_) = groups.get_by_id(id) {
             panic!("Group ID is used!");
         }
-    }
-
-    // *** Goyox's Testing Here
-    // This does not use the test files
-    fn create_all_users() -> AllUsers {
-        let mut root = User {
-            user: "root".into(),
-            hash: Some(("".into(), None)),
-            uid: 0,
-            gid: 0,
-            name: "root".into(),
-            home: "/root".into(),
-            shell: "/bin/ion".into()
-        };
-        let mut user = User {
-            user: "user".into(),
-            hash: Some(("".into(), None)),
-            uid: 0,
-            gid: 0,
-            name: "user".into(),
-            home: "/home/user".into(),
-            shell: "/bin/ion".into()
-        };
-
-        root.set_passwd("password").unwrap();
-        user.set_passwd("").unwrap();
-
-        let users = vec![root, user];
-
-        users.into_iter().collect()
-    }
-
-    #[test]
-    fn get_by_name_works() {
-        let mut expected_user = User {
-            user: "root".into(),
-            hash: Some(("".into(), None)),
-            uid: 0,
-            gid: 0,
-            name: "root".into(),
-            home: "/root".into(),
-            shell: "/bin/ion".into()
-        };
-
-        expected_user.set_passwd("password").unwrap();
-        let all_users = create_all_users();
-
-        assert_eq!(
-            expected_user.gid,
-            all_users.get_by_name("root").unwrap().gid
-        );
     }
 }
