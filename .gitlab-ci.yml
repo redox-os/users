@@ -15,7 +15,7 @@ build:redox:cargo:
 
 test:linux:cargo:
     script:
-        - cargo +nightly test --verbose
+        - cargo +nightly test --verbose -- --test-threads=1
 
 # TODO: Set up a redox testing docker image that would allow to run things
 #   like tests under redox
