@@ -1,6 +1,6 @@
 [package]
 name = "redox_users"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["Jose Narvaez <goyox86@gmail.com>", "Wesley Hershberger <mggmugginsmc@gmail.com>"]
 description = "A Rust library to access Redox users and groups functionality"
 license = "MIT"
