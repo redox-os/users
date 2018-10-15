@@ -48,7 +48,7 @@ use std::time::Duration;
 use argon2rs::verifier::Encoded;
 use argon2rs::{Argon2, Variant};
 use failure::Error;
-use rand::Rng;
+use rand::RngCore;
 use rand::os::OsRng;
 use syscall::Error as SyscallError;
 #[cfg(target_os = "redox")]
