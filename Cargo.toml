@@ -11,6 +11,6 @@ keywords = ["redox", "auth"]
 
 [dependencies]
 argon2rs = { version = "0.2", default-features = false }
-rand = "0.4"
+rand = "0.5"
 redox_syscall = "0.1"
 failure = "0.1.1"
