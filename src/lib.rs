@@ -68,11 +68,9 @@ const DEFAULT_SCHEME: &'static str = "file:";
 #[cfg(not(target_os = "redox"))]
 const DEFAULT_SCHEME: &'static str = "";
 
-const MIN_GID: usize = 1000;
-const MAX_GID: usize = 6000;
-const MIN_UID: usize = 1000;
-const MAX_UID: usize = 6000;
-const TIMEOUT: u64 = 3;
+const MIN_ID: usize = 1000;
+const MAX_ID: usize = 6000;
+const DEFAULT_TIMEOUT: u64 = 3;
 
 // Testing values
 #[cfg(test)]
@@ -191,7 +189,9 @@ pub struct User {
     /// Home directory path
     pub home: String,
     /// Shell path
-    pub shell: String
+    pub shell: String,
+    /// Failed login delay duration
+    auth_delay: Duration,
 }
 
 impl User {
@@ -203,8 +203,7 @@ impl User {
     /// # Panics
     /// If the User's hash fields are unpopulated, this function will panic
     /// (see [`AllUsers`](struct.AllUsers.html#shadowfile-handling) for more info)
-    pub fn set_passwd<T>(&mut self, password: T) -> Result<()>
-    where T: AsRef<str> {
+    pub fn set_passwd(&mut self, password: impl AsRef<str>) -> Result<()> {
         self.panic_if_unpopulated();
         let password = password.as_ref();
 
@@ -244,8 +243,7 @@ impl User {
     /// # Panics
     /// If the User's hash fields are unpopulated, this function will panic
     /// (see [`AllUsers`](struct.AllUsers.html#shadowfile-handling) for more info)
-    pub fn verify_passwd<T>(&self, password: T) -> bool
-    where T: AsRef<str> {
+    pub fn verify_passwd(&self, password: impl AsRef<str>) -> bool {
         self.panic_if_unpopulated();
         // Safe because it will have panicked already if self.hash.is_none()
         let &(ref hash, ref encoded) = self.hash.as_ref().unwrap();
@@ -258,7 +256,8 @@ impl User {
         };
 
         if !verified {
-            sleep(Duration::new(TIMEOUT, 0));
+            #[cfg(not(test))] // Make tests run faster
+            sleep(self.auth_delay);
         }
         verified
     }
@@ -305,7 +304,8 @@ impl User {
     ///    - `HOME` set to the user's `home` field.
     ///    - `SHELL` set to the user's `shell` field.
     pub fn login_cmd<T>(&self, cmd: T) -> Command
-    where T: std::convert::AsRef<std::ffi::OsStr> + AsRef<str> {
+        where T: std::convert::AsRef<std::ffi::OsStr> + AsRef<str>
+    {
         let mut command = Command::new(cmd);
         command
             .uid(self.uid as u32)
@@ -350,7 +350,7 @@ impl User {
 }
 
 impl Display for User {
-    /// This returns an entry for `/etc/passwd`
+    /// Format this user as an entry in `/etc/passwd`
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         #[cfg_attr(rustfmt, rustfmt_skip)]
         write!(f, "{};{};{};{};{};{}",
@@ -394,7 +394,8 @@ impl FromStr for User {
             gid,
             name: name.into(),
             home: home.into(),
-            shell: shell.into()
+            shell: shell.into(),
+            auth_delay: Duration::default(),
         })
     }
 }
@@ -407,10 +408,11 @@ pub struct Group {
     /// Unique group id
     pub gid: usize,
     /// Group members usernames
-    pub users: Vec<String>
+    pub users: Vec<String>,
 }
 
 impl Display for Group {
+    /// Format this group as an entry in `/etc/group`.
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         #[cfg_attr(rustfmt, rustfmt_skip)]
         write!(f, "{};{};{}",
@@ -441,7 +443,7 @@ impl FromStr for Group {
         Ok(Group {
             group: group.into(),
             gid,
-            users
+            users,
         })
     }
 }
@@ -455,7 +457,7 @@ impl FromStr for Group {
 ///
 /// Basic usage:
 ///
-/// ```
+/// ```no_run
 /// # use redox_users::get_euid;
 /// let euid = get_euid().unwrap();
 /// ```
@@ -475,7 +477,7 @@ pub fn get_euid() -> Result<usize> {
 ///
 /// Basic usage:
 ///
-/// ```
+/// ```no_run
 /// # use redox_users::get_uid;
 /// let uid = get_uid().unwrap();
 /// ```
@@ -495,7 +497,7 @@ pub fn get_uid() -> Result<usize> {
 ///
 /// Basic usage:
 ///
-/// ```
+/// ```no_run
 /// # use redox_users::get_egid;
 /// let egid = get_egid().unwrap();
 /// ```
@@ -515,7 +517,7 @@ pub fn get_egid() -> Result<usize> {
 ///
 /// Basic usage:
 ///
-/// ```
+/// ```no_run
 /// # use redox_users::get_gid;
 /// let gid = get_gid().unwrap();
 /// ```
@@ -536,9 +538,13 @@ pub fn get_gid() -> Result<usize> {
 /// In most situations, `Config::default()` will work just fine.
 /// The other methods on this struct are usually for finer control
 /// of an `AllUsers` or `AllGroups` if it is required.
+#[derive(Clone)]
 pub struct Config {
     auth_enabled: bool,
     scheme: String,
+    auth_delay: Duration,
+    min_id: usize,
+    max_id: usize,
 }
 
 impl Config {
@@ -548,15 +554,36 @@ impl Config {
         Config {
             auth_enabled: true,
             scheme: String::from(DEFAULT_SCHEME),
+            auth_delay: Duration::new(DEFAULT_TIMEOUT, 0),
+            min_id: MIN_ID,
+            max_id: MAX_ID,
         }
+    }
+    
+    /// Set the delay for a failed authentication. Default is 3 seconds.
+    pub fn auth_delay(mut self, delay: Duration) -> Config {
+        self.auth_delay = delay;
+        self
+    }
+    
+    /// Set the smallest ID possible to use when finding an unused ID.
+    pub fn min_id(mut self, id: usize) -> Config {
+        self.min_id = id;
+        self
+    }
+    
+    /// Set the largest possible ID to use when finding an unused ID.
+    pub fn max_id(mut self, id: usize) -> Config {
+        self.max_id = id;
+        self
     }
     
     /// Set the scheme relative to which the `AllUsers` or `AllGroups`
     /// should be looking for its data files. This is a compromise between
     /// exposing implementation details and providing fine enough
     /// control over the behavior of this API.
-    pub fn scheme(mut self, scheme: impl AsRef<str>) -> Config {
-        self.scheme = scheme.as_ref().to_string();
+    pub fn scheme(mut self, scheme: String) -> Config {
+        self.scheme = scheme;
         self
     }
 }
@@ -567,13 +594,10 @@ impl Default for Config {
         Config {
             auth_enabled: false,
             scheme: String::from(DEFAULT_SCHEME),
+            auth_delay: Duration::new(DEFAULT_TIMEOUT, 0),
+            min_id: MIN_ID,
+            max_id: MAX_ID,
         }
-    }
-}
-
-impl AsRef<Config> for Config {
-    fn as_ref(&self) -> &Self {
-        self
     }
 }
 
@@ -605,23 +629,23 @@ impl AsRef<Config> for Config {
 /// the `User` handling action will panic.
 pub struct AllUsers {
     users: Vec<User>,
-    auth_enabled: bool
+    config: Config,
 }
 
 impl AllUsers {
     /// See [Shadowfile Handling](struct.AllUsers.html#shadowfile-handling) for
     /// configuration information regarding this constructor.
     //TODO: Indicate if parsing an individual line failed or not
-    //TODO: Ugly
-    pub fn new(config: impl AsRef<Config>) -> Result<AllUsers> {
-        let config = config.as_ref();
+    pub fn new(config: Config) -> Result<AllUsers> {
         let mut passwd_file = PathBuf::from(&config.scheme);
         passwd_file.push(PASSWD_FILE);
+
         let passwd_cntnt = read_locked_file(passwd_file)?;
 
         let mut passwd_entries: Vec<User> = Vec::new();
         for line in passwd_cntnt.lines() {
-            if let Ok(user) = User::from_str(line) {
+            if let Ok(mut user) = User::from_str(line) {
+                user.auth_delay = config.auth_delay;
                 passwd_entries.push(user);
             }
         }
@@ -649,7 +673,7 @@ impl AllUsers {
 
         Ok(AllUsers {
             users: passwd_entries,
-            auth_enabled: config.auth_enabled
+            config
         })
     }
 
@@ -671,14 +695,16 @@ impl AllUsers {
     /// let user = users.get_by_id(0).unwrap();
     /// ```
     pub fn get_by_name<T>(&self, username: T) -> Option<&User>
-    where T: AsRef<str> {
+        where T: AsRef<str>
+    {
         self.iter()
             .find(|user| user.user == username.as_ref())
     }
 
     /// Mutable version of ['get_by_name'](struct.AllUsers.html#method.get_by_name)
     pub fn get_mut_by_name<T>(&mut self, username: T) -> Option<&mut User>
-    where T: AsRef<str> {
+        where T: AsRef<str>
+    {
         self.iter_mut()
             .find(|user| user.user == username.as_ref())
     }
@@ -714,7 +740,7 @@ impl AllUsers {
     /// let uid = users.get_unique_id().expect("no available uid");
     /// ```
     pub fn get_unique_id(&self) -> Option<usize> {
-        for uid in MIN_UID..MAX_UID {
+        for uid in self.config.min_id..self.config.max_id {
             if !self.iter().any(|user| uid == user.uid) {
                 return Some(uid)
             }
@@ -735,6 +761,7 @@ impl AllUsers {
     /// This function will panic if `true` was not passed to
     /// [`AllUsers::new`](struct.AllUsers.html#method.new) (see
     /// [`Shadowfile handling`](struct.AllUsers.html#shadowfile-handling))
+    //TODO: Take uid/gid as Option<usize> and if none, find an unused ID.
     pub fn add_user(
         &mut self,
         login: &str,
@@ -743,15 +770,14 @@ impl AllUsers {
         name: &str,
         home: &str,
         shell: &str
-    ) -> Result<()>
-    {
+    ) -> Result<()> {
         if self.iter()
             .any(|user| user.user == login || user.uid == uid)
         {
             return Err(From::from(UsersError::AlreadyExists))
         }
 
-        if !self.auth_enabled {
+        if !self.config.auth_enabled {
             panic!("Attempt to create user without access to the shadowfile");
         }
 
@@ -762,7 +788,8 @@ impl AllUsers {
             gid,
             name: name.into(),
             home: home.into(),
-            shell: shell.into()
+            shell: shell.into(),
+            auth_delay: self.config.auth_delay
         });
         Ok(())
     }
@@ -770,8 +797,7 @@ impl AllUsers {
     /// Remove a user from the system. This is a mutating operation,
     /// and users of the crate must therefore call [`save`](struct.AllUsers.html#method.save)
     /// in order for changes to be applied to the system.
-    pub fn remove_by_name<T>(&mut self, name: T) -> Result<()>
-    where T: AsRef<str> {
+    pub fn remove_by_name(&mut self, name: impl AsRef<str>) -> Result<()> {
         self.remove(|user| user.user == name.as_ref())
     }
 
@@ -782,7 +808,8 @@ impl AllUsers {
 
     // Reduce code duplication
     fn remove<P>(&mut self, predicate: P) -> Result<()>
-    where P: FnMut(&User) -> bool {
+        where P: FnMut(&User) -> bool
+    {
         let pos;
         {
             let mut iter = self.iter();
@@ -806,13 +833,13 @@ impl AllUsers {
         let mut shadowstring = String::new();
         for user in &self.users {
             userstring.push_str(&format!("{}\n", user.to_string().as_str()));
-            if self.auth_enabled {
+            if self.config.auth_enabled {
                 shadowstring.push_str(&format!("{}\n", user.shadowstring()));
             }
         }
 
         write_locked_file(PASSWD_FILE, userstring)?;
-        if self.auth_enabled {
+        if self.config.auth_enabled {
             write_locked_file(SHADOW_FILE, shadowstring)?;
         }
         Ok(())
@@ -827,7 +854,8 @@ impl AllUsers {
 /// General notes that also apply to this struct may be found with
 /// [`AllUsers`](struct.AllUsers.html).
 pub struct AllGroups {
-    groups: Vec<Group>
+    groups: Vec<Group>,
+    config: Config,
 }
 
 //UNOPTIMIZED: Right now this struct is just a Vec and we are doing O(n)
@@ -836,14 +864,13 @@ pub struct AllGroups {
 impl AllGroups {
     /// Create a new AllGroups
     //TODO: Indicate if parsing an individual line failed or not
-    pub fn new(config: impl AsRef<Config>) -> Result<AllGroups> {
-        let config = config.as_ref();
+    pub fn new(config: Config) -> Result<AllGroups> {
         let mut group_file = PathBuf::from(&config.scheme);
         group_file.push(GROUP_FILE);
+
         let group_cntnt = read_locked_file(group_file)?;
 
         let mut entries: Vec<Group> = Vec::new();
-
         for line in group_cntnt.lines() {
             if let Ok(group) = Group::from_str(line) {
                 entries.push(group);
@@ -851,7 +878,8 @@ impl AllGroups {
         }
 
         Ok(AllGroups {
-            groups: entries
+            groups: entries,
+            config,
         })
     }
 
@@ -872,15 +900,13 @@ impl AllGroups {
     /// let groups = AllGroups::new(Config::default()).unwrap();
     /// let group = groups.get_by_name("wheel").unwrap();
     /// ```
-    pub fn get_by_name<T>(&self, groupname: T) -> Option<&Group>
-    where T: AsRef<str> {
+    pub fn get_by_name(&self, groupname: impl AsRef<str>) -> Option<&Group> {
         self.iter()
             .find(|group| group.group == groupname.as_ref())
     }
 
     /// Mutable version of [`get_by_name`](struct.AllGroups.html#method.get_by_name)
-    pub fn get_mut_by_name<T>(&mut self, groupname: T) -> Option<&mut Group>
-    where T: AsRef<str> {
+    pub fn get_mut_by_name(&mut self, groupname: impl AsRef<str>) -> Option<&mut Group> {
         self.iter_mut()
             .find(|group| group.group == groupname.as_ref())
     }
@@ -916,7 +942,7 @@ impl AllGroups {
     /// let gid = groups.get_unique_id().expect("no available gid");
     /// ```
     pub fn get_unique_id(&self) -> Option<usize> {
-        for gid in MIN_GID..MAX_GID {
+        for gid in self.config.min_id..self.config.max_id {
             if !self.iter().any(|group| gid == group.gid) {
                 return Some(gid)
             }
@@ -929,13 +955,13 @@ impl AllGroups {
     /// This function is classified as a mutating operation,
     /// and users must therefore call [`save`](struct.AllUsers.html#method.save)
     /// in order for the new group to be applied to the system.
+    //TODO: Take Option<usize> for gid and find unused ID if None
     pub fn add_group(
         &mut self,
         name: &str,
         gid: usize,
         users: &[&str]
-    ) -> Result<()>
-    {
+    ) -> Result<()> {
         if self.iter()
             .any(|group| group.group == name || group.gid == gid)
         {
@@ -959,8 +985,7 @@ impl AllGroups {
     /// Remove a group from the system. This is a mutating operation,
     /// and users of the crate must therefore call [`save`](struct.AllGroups.html#method.save)
     /// in order for changes to be applied to the system.
-    pub fn remove_by_name<T>(&mut self, name: T) -> Result<()>
-    where T: AsRef<str> {
+    pub fn remove_by_name(&mut self, name: impl AsRef<str>) -> Result<()> {
         self.remove(|group| group.group == name.as_ref())
     }
 
@@ -971,7 +996,8 @@ impl AllGroups {
 
     // Reduce code duplication
     fn remove<P>(&mut self, predicate: P) -> Result<()>
-    where P: FnMut(&Group) -> bool {
+        where P: FnMut(&Group) -> bool
+    {
         let pos;
         {
             let mut iter = self.iter();
@@ -1261,29 +1287,24 @@ mod test {
 
     // *** Misc ***
     #[test]
-    fn get_unused_ids() {
+    fn users_get_unused_ids() {
         let users = AllUsers::new(Config::default()).unwrap_or_else(|err| panic!(err));
         let id = users.get_unique_id().unwrap();
-        if id < MIN_UID || id > MAX_UID {
+        if id < users.config.min_id || id > users.config.max_id {
             panic!("User ID is not between allowed margins")
         } else if let Some(_) = users.get_by_id(id) {
             panic!("User ID is used!");
         }
-
+    }
+    
+    #[test]
+    fn groups_get_unused_ids() {
         let groups = AllGroups::new(Config::default()).unwrap();
         let id = groups.get_unique_id().unwrap();
-        if id < MIN_GID || id > MAX_GID {
+        if id < groups.config.min_id || id > groups.config.max_id {
             panic!("Group ID is not between allowed margins")
         } else if let Some(_) = groups.get_by_id(id) {
             panic!("Group ID is used!");
         }
-    }
-    
-    // Just playing around with API
-    #[test]
-    fn reference_config() {
-        let config = Config::default();
-        let _ = AllUsers::new(&config).unwrap();
-        let _ = AllGroups::new(&config).unwrap();
     }
 }
