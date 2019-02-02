@@ -43,7 +43,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::slice::{Iter, IterMut};
 use std::str::FromStr;
-use std::thread::sleep;
+use std::thread;
 use std::time::Duration;
 
 use argon2rs::verifier::Encoded;
@@ -55,7 +55,6 @@ use syscall::Error as SyscallError;
 #[cfg(target_os = "redox")]
 use syscall::flag::{O_EXLOCK, O_SHLOCK};
 
-//TODO: Allow a configuration file for all this someplace
 #[cfg(not(test))]
 const PASSWD_FILE: &'static str = "/etc/passwd";
 #[cfg(not(test))]
@@ -159,7 +158,7 @@ fn write_locked_file(file: impl AsRef<Path>, data: String) -> Result<()> {
 }
 
 /// A struct representing a Redox user.
-/// Currently maps to an entry in the '/etc/passwd' file.
+/// Currently maps to an entry in the `/etc/passwd` file.
 ///
 /// # Unset vs. Blank Passwords
 /// A note on unset passwords vs. blank passwords. A blank password
@@ -257,7 +256,7 @@ impl User {
 
         if !verified {
             #[cfg(not(test))] // Make tests run faster
-            sleep(self.auth_delay);
+            thread::sleep(self.auth_delay);
         }
         verified
     }
@@ -349,6 +348,18 @@ impl User {
     }
 }
 
+impl Name for User {
+    fn name(&self) -> &str {
+        &self.name
+    }
+}
+
+impl Id for User {
+    fn id(&self) -> usize {
+        self.uid
+    }
+}
+
 impl Display for User {
     /// Format this user as an entry in `/etc/passwd`
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
@@ -401,7 +412,7 @@ impl FromStr for User {
 }
 
 /// A struct representing a Redox users group.
-/// Currently maps to an '/etc/group' file entry.
+/// Currently maps to an `/etc/group` file entry.
 pub struct Group {
     /// Group name
     pub group: String,
@@ -409,6 +420,18 @@ pub struct Group {
     pub gid: usize,
     /// Group members usernames
     pub users: Vec<String>,
+}
+
+impl Name for Group {
+    fn name(&self) -> &str {
+        &self.group
+    }
+}
+
+impl Id for Group {
+    fn id(&self) -> usize {
+        self.gid
+    }
 }
 
 impl Display for Group {
@@ -426,6 +449,7 @@ impl Display for Group {
 impl FromStr for Group {
     type Err = failure::Error;
 
+    /// Parse an entry from `/etc/group`
     fn from_str(s: &str) -> Result<Self> {
         let mut parts = s.split(';');
 
@@ -533,7 +557,8 @@ pub fn get_gid() -> Result<usize> {
 ///
 /// The use of the fields of this struct is completely optional
 /// depending on what constructor it is passed to. For example,
-/// `AllGroups` doesn't care if auth is enabled or not.
+/// `AllGroups` doesn't care if auth is enabled or not, or what
+/// the duration is.
 ///
 /// In most situations, `Config::default()` will work just fine.
 /// The other methods on this struct are usually for finer control
@@ -553,10 +578,7 @@ impl Config {
     pub fn with_auth() -> Config {
         Config {
             auth_enabled: true,
-            scheme: String::from(DEFAULT_SCHEME),
-            auth_delay: Duration::new(DEFAULT_TIMEOUT, 0),
-            min_id: MIN_ID,
-            max_id: MAX_ID,
+            ..Default::default()
         }
     }
     
@@ -601,10 +623,146 @@ impl Default for Config {
     }
 }
 
-/// Struct encapsulating all users on the system
-///
-/// [`AllUsers`](struct.AllUsers.html) is a struct providing
-/// (borrowed) access to all the users and groups on the system.
+// Nasty hack to prevent the compiler complaining about
+// "leaking" `AllInner`
+mod sealed {
+    use Config;
+    
+    pub trait Name {
+        fn name(&self) -> &str;
+    }
+
+    pub trait Id {
+        fn id(&self) -> usize;
+    }
+    
+    pub trait AllInner {
+        // Group+User, thanks Dad
+        type Gruser: Name + Id;
+        
+        /// These functions grab internal elements so that the other
+        /// methods of `All` can manipulate them.
+        fn list(&self) -> &Vec<Self::Gruser>;
+        fn list_mut(&mut self) -> &mut Vec<Self::Gruser>;
+        fn config(&self) -> &Config;
+    }
+}
+
+use sealed::{AllInner, Id, Name};
+
+pub trait All: AllInner {
+    /// Get an iterator borrowing all [`User`](struct.User.html)'s
+    /// or [`Group`](struct.Group.html)'s on the system.
+    fn iter(&self) -> Iter<<Self as AllInner>::Gruser> {
+        self.list().iter()
+    }
+    
+    /// Get an iterator mutably borrowing all [`User`](struct.User.html)'s
+    /// or [`Group`](struct.Group.html)'s on the system.
+    fn iter_mut(&mut self) -> IterMut<<Self as AllInner>::Gruser> {
+        self.list_mut().iter_mut()
+    }
+    
+    /// Borrow the [`User`](struct.User.html) or [`Group`](struct.Group.html)
+    /// with a given name.
+    ///
+    /// # Examples
+    ///
+    /// Basic usage:
+    ///
+    /// ```no_run
+    /// # use redox_users::{AllUsers, Config};
+    /// let users = AllUsers::new(Config::default()).unwrap();
+    /// let user = users.get_by_name("root").unwrap();
+    /// ```
+    fn get_by_name(&self, name: impl AsRef<str>) -> Option<&<Self as AllInner>::Gruser> {
+        self.iter()
+            .find(|gruser| gruser.name() == name.as_ref() )
+    }
+    
+    /// Mutable version of ['get_by_name'](trait.All.html#method.get_by_name)
+    fn get_mut_by_name(&mut self, name: impl AsRef<str>) -> Option<&mut <Self as AllInner>::Gruser> {
+        self.iter_mut()
+            .find(|gruser| gruser.name() == name.as_ref() )
+    }
+    
+    /// Borrow the [`User`](struct.User.html) or [`Group`](struct.Group.html)
+    /// with the given ID.
+    ///
+    /// # Examples
+    ///
+    /// Basic usage:
+    ///
+    /// ```no_run
+    /// # use redox_users::{AllUsers, Config};
+    /// let users = AllUsers::new(Config::default()).unwrap();
+    /// let user = users.get_by_id(0).unwrap();
+    /// ```
+    fn get_by_id(&self, id: usize) -> Option<&<Self as AllInner>::Gruser> {
+        self.iter()
+            .find(|gruser| gruser.id() == id )
+    }
+    
+    /// Mutable version of [`get_by_id`](trait.All.html#method.get_by_id)
+    fn get_mut_by_id(&mut self, id: usize) -> Option<&mut <Self as AllInner>::Gruser> {
+        self.iter_mut()
+            .find(|gruser| gruser.id() == id )
+    }
+    
+    /// Provides an unused id based on the min and max values passed to
+    /// the `All` in the [`Config`](struct.Config.html)
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use redox_users::{AllUsers, Config};
+    /// let users = AllUsers::new(Config::default()).unwrap();
+    /// let uid = users.get_unique_id().expect("no available uid");
+    /// ```
+    fn get_unique_id(&self) -> Option<usize> {
+        for id in self.config().min_id..self.config().max_id {
+            if !self.iter().any(|gruser| gruser.id() == id ) {
+                return Some(id)
+            }
+        }
+        None
+    }
+    
+    /// Remove a [`User`](struct.User.html) or [`Group`](struct.Group.html)
+    /// from this `All` given it's name.
+    fn remove_by_name(&mut self, name: impl AsRef<str>) -> Result<()> {
+        self.remove(|gruser| gruser.name() == name.as_ref() )
+    }
+    
+    /// Id version of [`remove_by_name`](trait.All.html#method.remove_by_name)
+    fn remove_by_id(&mut self, id: usize) -> Result<()> {
+        self.remove(|gruser| gruser.id() == id )
+    }
+    
+    // Reduce code duplication
+    fn remove<P>(&mut self, predicate: P) -> Result<()>
+        where P: FnMut(&<Self as AllInner>::Gruser) -> bool
+    {
+        let pos;
+        {
+            let mut iter = self.iter();
+            if let Some(posi) = iter.position(predicate) {
+                pos = posi;
+            } else {
+                return Err(From::from(UsersError::NotFound))
+            };
+        }
+
+        self.list_mut().remove(pos);
+
+        Ok(())
+    }
+}
+
+/// [`AllUsers`](struct.AllUsers.html) provides
+/// (borrowed) access to all the users on the system.
+/// Note that this struct implements [`All`](trait.All.html) for
+/// a bunch of convenient access functions.
 ///
 /// # Notes
 /// Note that everything in this section also applies to
@@ -677,77 +835,6 @@ impl AllUsers {
         })
     }
 
-    /// Get an iterator over all system users
-    pub fn iter(&self) -> Iter<User> { self.users.iter() }
-
-    /// Mutable version of `iter`
-    pub fn iter_mut(&mut self) -> IterMut<User> { self.users.iter_mut() }
-
-    /// Borrow the [`User`](struct.User.html) representing a user for a given username.
-    ///
-    /// # Examples
-    ///
-    /// Basic usage:
-    ///
-    /// ```no_run
-    /// # use redox_users::{AllUsers, Config};
-    /// let users = AllUsers::new(Config::default()).unwrap();
-    /// let user = users.get_by_id(0).unwrap();
-    /// ```
-    pub fn get_by_name<T>(&self, username: T) -> Option<&User>
-        where T: AsRef<str>
-    {
-        self.iter()
-            .find(|user| user.user == username.as_ref())
-    }
-
-    /// Mutable version of ['get_by_name'](struct.AllUsers.html#method.get_by_name)
-    pub fn get_mut_by_name<T>(&mut self, username: T) -> Option<&mut User>
-        where T: AsRef<str>
-    {
-        self.iter_mut()
-            .find(|user| user.user == username.as_ref())
-    }
-
-    /// Borrow the [`User`](struct.AllUsers.html) representing given user ID.
-    ///
-    /// # Examples
-    ///
-    /// Basic usage:
-    ///
-    /// ```no_run
-    /// # use redox_users::{AllUsers, Config};
-    /// let users = AllUsers::new(Config::default()).unwrap();
-    /// let user = users.get_by_id(0).unwrap();
-    /// ```
-    pub fn get_by_id(&self, uid: usize) -> Option<&User> {
-        self.iter().find(|user| user.uid == uid)
-    }
-
-    /// Mutable version of [`get_by_id`](struct.AllUsers.html#method.get_by_id)
-    pub fn get_mut_by_id(&mut self, uid: usize) -> Option<&mut User> {
-        self.iter_mut().find(|user| user.uid == uid)
-    }
-
-    /// Provides an unused user id, defined as "unused" by the system
-    /// defaults, between 1000 and 6000
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// # use redox_users::{AllUsers, Config};
-    /// let users = AllUsers::new(Config::default()).unwrap();
-    /// let uid = users.get_unique_id().expect("no available uid");
-    /// ```
-    pub fn get_unique_id(&self) -> Option<usize> {
-        for uid in self.config.min_id..self.config.max_id {
-            if !self.iter().any(|user| uid == user.uid) {
-                return Some(uid)
-            }
-        }
-        None
-    }
-
     /// Adds a user with the specified attributes to the
     /// AllUsers instance. Note that the user's password is set unset (see
     /// [Unset vs Blank Passwords](struct.User.html#unset-vs-blank-passwords))
@@ -794,37 +881,6 @@ impl AllUsers {
         Ok(())
     }
 
-    /// Remove a user from the system. This is a mutating operation,
-    /// and users of the crate must therefore call [`save`](struct.AllUsers.html#method.save)
-    /// in order for changes to be applied to the system.
-    pub fn remove_by_name(&mut self, name: impl AsRef<str>) -> Result<()> {
-        self.remove(|user| user.user == name.as_ref())
-    }
-
-    /// User-id version of [`remove_by_name`](struct.AllUsers.html#method.remove_by_name)
-    pub fn remove_by_id(&mut self, id: usize) -> Result<()> {
-        self.remove(|user| user.uid == id)
-    }
-
-    // Reduce code duplication
-    fn remove<P>(&mut self, predicate: P) -> Result<()>
-        where P: FnMut(&User) -> bool
-    {
-        let pos;
-        {
-            let mut iter = self.iter();
-            if let Some(posi) = iter.position(predicate) {
-                pos = posi;
-            } else {
-                return Err(From::from(UsersError::NotFound))
-            };
-        }
-
-        self.users.remove(pos);
-
-        Ok(())
-    }
-
     /// Syncs the data stored in the AllUsers instance to the filesystem.
     /// To apply changes to the system from an AllUsers, you MUST call this function!
     /// This function currently does a bunch of fs I/O so it is error-prone.
@@ -846,10 +902,28 @@ impl AllUsers {
     }
 }
 
-/// Struct encapsulating all the groups on the system
-///
-/// [`AllGroups`](struct.AllGroups.html) is a struct that provides
-/// (borrowed) access to all groups on the system.
+impl AllInner for AllUsers {
+    type Gruser = User;
+    
+    fn list(&self) -> &Vec<Self::Gruser> {
+        &self.users
+    }
+    
+    fn list_mut(&mut self) -> &mut Vec<Self::Gruser> {
+        &mut self.users
+    }
+    
+    fn config(&self) -> &Config {
+        &self.config
+    }
+}
+
+impl All for AllUsers {}
+
+/// [`AllGroups`](struct.AllGroups.html) provides
+/// (borrowed) access to all groups on the system. Note that this
+/// struct implements [`All`](trait.All.html), for a bunch of convenience
+/// functions.
 ///
 /// General notes that also apply to this struct may be found with
 /// [`AllUsers`](struct.AllUsers.html).
@@ -881,73 +955,6 @@ impl AllGroups {
             groups: entries,
             config,
         })
-    }
-
-    /// Get an iterator over all system groups
-    pub fn iter(&self) -> Iter<Group> { self.groups.iter() }
-
-    /// Mutable version of `iter`
-    pub fn iter_mut(&mut self) -> IterMut<Group> { self.groups.iter_mut() }
-
-    /// Gets the [`Group`](struct.Group.html) for a given group name.
-    ///
-    /// # Examples
-    ///
-    /// Basic usage:
-    ///
-    /// ```no_run
-    /// # use redox_users::{AllGroups, Config};
-    /// let groups = AllGroups::new(Config::default()).unwrap();
-    /// let group = groups.get_by_name("wheel").unwrap();
-    /// ```
-    pub fn get_by_name(&self, groupname: impl AsRef<str>) -> Option<&Group> {
-        self.iter()
-            .find(|group| group.group == groupname.as_ref())
-    }
-
-    /// Mutable version of [`get_by_name`](struct.AllGroups.html#method.get_by_name)
-    pub fn get_mut_by_name(&mut self, groupname: impl AsRef<str>) -> Option<&mut Group> {
-        self.iter_mut()
-            .find(|group| group.group == groupname.as_ref())
-    }
-
-    /// Gets the [`Group`](struct.Group.html) for a given group ID.
-    ///
-    /// # Examples
-    ///
-    /// Basic usage:
-    ///
-    /// ```no_run
-    /// # use redox_users::{AllGroups, Config};
-    /// let groups = AllGroups::new(Config::default()).unwrap();
-    /// let group = groups.get_by_id(1).unwrap();
-    /// ```
-    pub fn get_by_id(&self, gid: usize) -> Option<&Group> {
-        self.iter().find(|group| group.gid == gid)
-    }
-
-    /// Mutable version of [`get_by_id`](struct.AllGroups.html#method.get_by_id)
-    pub fn get_mut_by_id(&mut self, gid: usize) -> Option<&mut Group> {
-        self.iter_mut().find(|group| group.gid == gid)
-    }
-
-    /// Provides an unused group id, defined as "unused" by the system
-    /// defaults, between 1000 and 6000
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// # use redox_users::{AllGroups, Config};
-    /// let groups = AllGroups::new(Config::default()).unwrap();
-    /// let gid = groups.get_unique_id().expect("no available gid");
-    /// ```
-    pub fn get_unique_id(&self) -> Option<usize> {
-        for gid in self.config.min_id..self.config.max_id {
-            if !self.iter().any(|group| gid == group.gid) {
-                return Some(gid)
-            }
-        }
-        None
     }
 
     /// Adds a group with the specified attributes to this AllGroups
@@ -982,37 +989,6 @@ impl AllGroups {
         Ok(())
     }
 
-    /// Remove a group from the system. This is a mutating operation,
-    /// and users of the crate must therefore call [`save`](struct.AllGroups.html#method.save)
-    /// in order for changes to be applied to the system.
-    pub fn remove_by_name(&mut self, name: impl AsRef<str>) -> Result<()> {
-        self.remove(|group| group.group == name.as_ref())
-    }
-
-    /// Group-id version of [`remove_by_name`](struct.AllGroups.html#method.remove_by_name)
-    pub fn remove_by_id(&mut self, id: usize) -> Result<()> {
-        self.remove(|group| group.gid == id)
-    }
-
-    // Reduce code duplication
-    fn remove<P>(&mut self, predicate: P) -> Result<()>
-        where P: FnMut(&Group) -> bool
-    {
-        let pos;
-        {
-            let mut iter = self.iter();
-            if let Some(posi) = iter.position(predicate) {
-                pos = posi;
-            } else {
-                return Err(From::from(UsersError::NotFound))
-            };
-        }
-
-        self.groups.remove(pos);
-
-        Ok(())
-    }
-
     /// Syncs the data stored in the AllGroups instance to the filesystem.
     /// To apply changes to the AllGroups, you MUST call this function.
     /// This function currently does a lot of fs I/O so it is error-prone.
@@ -1025,6 +1001,24 @@ impl AllGroups {
         write_locked_file(GROUP_FILE, groupstring)
     }
 }
+
+impl AllInner for AllGroups {
+    type Gruser = Group;
+    
+    fn list(&self) -> &Vec<Self::Gruser> {
+        &self.groups
+    }
+    
+    fn list_mut(&mut self) -> &mut Vec<Self::Gruser> {
+        &mut self.groups
+    }
+    
+    fn config(&self) -> &Config {
+        &self.config
+    }
+}
+
+impl All for AllGroups {}
 
 #[cfg(test)]
 mod test {
