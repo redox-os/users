@@ -33,7 +33,7 @@ extern crate syscall;
 extern crate failure;
 
 use std::convert::From;
-use std::fmt::{self, Display};
+use std::fmt::{self, Debug, Display};
 use std::fs::OpenOptions;
 use std::io::{Read, Write};
 #[cfg(target_os = "redox")]
@@ -360,6 +360,16 @@ impl Id for User {
     }
 }
 
+impl Debug for User {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f,
+            "User {{\n\tuser: {:?}\n\tuid: {:?}\n\tgid: {:?}\n\tname: {:?}
+            \thome: {:?}\n\tshell: {:?}\n\tauth_delay: {:?}\n}}",
+            self.user, self.uid, self.gid, self.name, self.home, self.shell, self.auth_delay
+        )
+    }
+}
+
 impl Display for User {
     /// Format this user as an entry in `/etc/passwd`
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
@@ -413,6 +423,7 @@ impl FromStr for User {
 
 /// A struct representing a Redox users group.
 /// Currently maps to an `/etc/group` file entry.
+#[derive(Debug)]
 pub struct Group {
     /// Group name
     pub group: String,
@@ -608,6 +619,12 @@ impl Config {
         self.scheme = scheme;
         self
     }
+    
+    fn in_scheme(&self, path: impl AsRef<Path>) -> PathBuf {
+        let mut canonical_path = PathBuf::from(&self.scheme);
+        canonical_path.push(path);
+        canonical_path
+    }
 }
 
 impl Default for Config {
@@ -729,33 +746,20 @@ pub trait All: AllInner {
     }
     
     /// Remove a [`User`](struct.User.html) or [`Group`](struct.Group.html)
-    /// from this `All` given it's name.
-    fn remove_by_name(&mut self, name: impl AsRef<str>) -> Result<()> {
-        self.remove(|gruser| gruser.name() == name.as_ref() )
+    /// from this `All` given it's name. This won't provide an indication
+    /// of whether the user was removed or not, but is guaranteed to work
+    /// if a user with the specified name exists.
+    fn remove_by_name(&mut self, name: impl AsRef<str>) {
+        // Significantly more elegant than other possible solutions.
+        // I wish it could indicate if it removed anything.
+        self.list_mut()
+            .retain(|gruser| gruser.name() != name.as_ref() );
     }
     
-    /// Id version of [`remove_by_name`](trait.All.html#method.remove_by_name)
-    fn remove_by_id(&mut self, id: usize) -> Result<()> {
-        self.remove(|gruser| gruser.id() == id )
-    }
-    
-    // Reduce code duplication
-    fn remove<P>(&mut self, predicate: P) -> Result<()>
-        where P: FnMut(&<Self as AllInner>::Gruser) -> bool
-    {
-        let pos;
-        {
-            let mut iter = self.iter();
-            if let Some(posi) = iter.position(predicate) {
-                pos = posi;
-            } else {
-                return Err(From::from(UsersError::NotFound))
-            };
-        }
-
-        self.list_mut().remove(pos);
-
-        Ok(())
+    /// Id version of [`remove_by_name`](trait.All.html#method.remove_by_name).
+    fn remove_by_id(&mut self, id: usize) {
+        self.list_mut()
+            .retain(|gruser| gruser.id() != id );
     }
 }
 
@@ -795,10 +799,7 @@ impl AllUsers {
     /// configuration information regarding this constructor.
     //TODO: Indicate if parsing an individual line failed or not
     pub fn new(config: Config) -> Result<AllUsers> {
-        let mut passwd_file = PathBuf::from(&config.scheme);
-        passwd_file.push(PASSWD_FILE);
-
-        let passwd_cntnt = read_locked_file(passwd_file)?;
+        let passwd_cntnt = read_locked_file(config.in_scheme(PASSWD_FILE))?;
 
         let mut passwd_entries: Vec<User> = Vec::new();
         for line in passwd_cntnt.lines() {
@@ -809,7 +810,7 @@ impl AllUsers {
         }
 
         if config.auth_enabled {
-            let shadow_cntnt = read_locked_file(SHADOW_FILE)?;
+            let shadow_cntnt = read_locked_file(config.in_scheme(SHADOW_FILE))?;
             let shadow_entries: Vec<&str> = shadow_cntnt.lines().collect();
             for entry in shadow_entries.iter() {
                 let mut entry = entry.split(';');
@@ -894,9 +895,9 @@ impl AllUsers {
             }
         }
 
-        write_locked_file(PASSWD_FILE, userstring)?;
+        write_locked_file(self.config.in_scheme(PASSWD_FILE), userstring)?;
         if self.config.auth_enabled {
-            write_locked_file(SHADOW_FILE, shadowstring)?;
+            write_locked_file(self.config.in_scheme(SHADOW_FILE), shadowstring)?;
         }
         Ok(())
     }
@@ -939,10 +940,7 @@ impl AllGroups {
     /// Create a new AllGroups
     //TODO: Indicate if parsing an individual line failed or not
     pub fn new(config: Config) -> Result<AllGroups> {
-        let mut group_file = PathBuf::from(&config.scheme);
-        group_file.push(GROUP_FILE);
-
-        let group_cntnt = read_locked_file(group_file)?;
+        let group_cntnt = read_locked_file(config.in_scheme(GROUP_FILE))?;
 
         let mut entries: Vec<Group> = Vec::new();
         for line in group_cntnt.lines() {
@@ -998,7 +996,7 @@ impl AllGroups {
             groupstring.push_str(&format!("{}\n", group.to_string().as_str()));
         }
 
-        write_locked_file(GROUP_FILE, groupstring)
+        write_locked_file(self.config.in_scheme(GROUP_FILE), groupstring)
     }
 }
 
@@ -1103,9 +1101,10 @@ mod test {
     #[test]
     fn get_user() {
         let users = AllUsers::new(Config::with_auth()).unwrap();
-        let root = users.get_by_id(0).unwrap();
+        
+        let root = users.get_by_id(0).expect("'root' user missing");
         assert_eq!(root.user, "root".to_string());
-        let &(ref hashstring, ref encoded) = root.hash.as_ref().unwrap();
+        let &(ref hashstring, ref encoded) = root.hash.as_ref().expect("'root' hash is None");
         assert_eq!(hashstring,
             &"$argon2i$m=4096,t=10,p=1$Tnc4UVV0N00$ML9LIOujd3nmAfkAwEcSTMPqakWUF0OUiLWrIy0nGLk".to_string());
         assert_eq!(root.uid, 0);
@@ -1118,9 +1117,9 @@ mod test {
             &None => panic!("Expected encoded argon hash!")
         }
 
-        let user = users.get_by_name("user").unwrap();
+        let user = users.get_by_name("user").expect("'user' user missing");
         assert_eq!(user.user, "user".to_string());
-        let &(ref hashstring, ref encoded) = user.hash.as_ref().unwrap();
+        let &(ref hashstring, ref encoded) = user.hash.as_ref().expect("'user' hash is None");
         assert_eq!(hashstring, &"".to_string());
         assert_eq!(user.uid, 1000);
         assert_eq!(user.gid, 1000);
@@ -1132,9 +1131,10 @@ mod test {
             &None => ()
         }
 
-        let li = users.get_by_name("li").unwrap();
+        let li = users.get_by_name("li").expect("'li' user missing");
+        println!("got li");
         assert_eq!(li.user, "li");
-        let &(ref hashstring, ref encoded) = li.hash.as_ref().unwrap();
+        let &(ref hashstring, ref encoded) = li.hash.as_ref().expect("'li' hash is None");
         assert_eq!(hashstring, &"!".to_string());
         assert_eq!(li.uid, 1007);
         assert_eq!(li.gid, 1007);
@@ -1154,7 +1154,7 @@ mod test {
         let id = 7099;
         users
             .add_user("fb", id, id, "FooBar", "/home/foob", "/bin/zsh")
-            .unwrap();
+            .expect("failed to add user 'fb'");
         //                                            weirdo ^^^^^^^^ :P
         users.save().unwrap();
         let p_file_content = read_locked_file(PASSWD_FILE).unwrap();
@@ -1176,7 +1176,7 @@ mod test {
         ));
 
         {
-            let fb = users.get_mut_by_name("fb").unwrap();
+            let fb = users.get_mut_by_name("fb").expect("'fb' user missing");
             fb.shell = "/bin/fish".to_string(); // That's better
             fb.set_passwd("").unwrap();
         }
@@ -1199,9 +1199,7 @@ mod test {
             "fb;\n"
         ));
 
-        {
-            users.remove_by_id(id).unwrap();
-        }
+        users.remove_by_id(id);
         users.save().unwrap();
         let file_content = read_locked_file(PASSWD_FILE).unwrap();
         assert_eq!(
@@ -1265,7 +1263,7 @@ mod test {
             )
         );
 
-        groups.remove_by_id(id).unwrap();
+        groups.remove_by_id(id);
         groups.save().unwrap();
         let file_content = read_locked_file(GROUP_FILE).unwrap();
         assert_eq!(
