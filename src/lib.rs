@@ -55,11 +55,8 @@ use syscall::Error as SyscallError;
 #[cfg(target_os = "redox")]
 use syscall::flag::{O_EXLOCK, O_SHLOCK};
 
-#[cfg(not(test))]
 const PASSWD_FILE: &'static str = "/etc/passwd";
-#[cfg(not(test))]
 const GROUP_FILE: &'static str = "/etc/group";
-#[cfg(not(test))]
 const SHADOW_FILE: &'static str = "/etc/shadow";
 
 #[cfg(target_os = "redox")]
@@ -70,17 +67,6 @@ const DEFAULT_SCHEME: &'static str = "";
 const MIN_ID: usize = 1000;
 const MAX_ID: usize = 6000;
 const DEFAULT_TIMEOUT: u64 = 3;
-
-// Testing values
-#[cfg(test)]
-const PASSWD_FILE: &'static str =
-    concat!(env!("CARGO_MANIFEST_DIR"), "/tests/passwd");
-#[cfg(test)]
-const GROUP_FILE: &'static str =
-    concat!(env!("CARGO_MANIFEST_DIR"), "/tests/group");
-#[cfg(test)]
-const SHADOW_FILE: &'static str =
-    concat!(env!("CARGO_MANIFEST_DIR"), "/tests/shadow");
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -120,7 +106,8 @@ impl From<SyscallError> for UsersError {
 }
 
 fn read_locked_file(file: impl AsRef<Path>) -> Result<String> {
-    println!("Opening file: {}", file.as_ref().display());
+    #[cfg(test)]
+    println!("Reading file: {}", file.as_ref().display());
     
     #[cfg(target_os = "redox")]
     let mut file = OpenOptions::new()
@@ -140,6 +127,9 @@ fn read_locked_file(file: impl AsRef<Path>) -> Result<String> {
 }
 
 fn write_locked_file(file: impl AsRef<Path>, data: String) -> Result<()> {
+    #[cfg(test)]
+    println!("Writing file: {}", file.as_ref().display());
+    
     #[cfg(target_os = "redox")]
     let mut file = OpenOptions::new()
         .write(true)
@@ -593,6 +583,12 @@ impl Config {
         }
     }
     
+    /// Builder pattern version of `Self::with_auth`.
+    pub fn auth(mut self, auth: bool) -> Config {
+        self.auth_enabled = auth;
+        self
+    }
+    
     /// Set the delay for a failed authentication. Default is 3 seconds.
     pub fn auth_delay(mut self, delay: Duration) -> Config {
         self.auth_delay = delay;
@@ -620,9 +616,16 @@ impl Config {
         self
     }
     
+    // Prepend a path with the scheme in this Config
     fn in_scheme(&self, path: impl AsRef<Path>) -> PathBuf {
         let mut canonical_path = PathBuf::from(&self.scheme);
-        canonical_path.push(path);
+        // Should be a little careful here, not sure I want this behavior
+        if path.as_ref().is_absolute() {
+            // This is nasty
+            canonical_path.push(path.as_ref().to_string_lossy()[1..].to_string());
+        } else {
+            canonical_path.push(path);
+        }
         canonical_path
     }
 }
@@ -1022,11 +1025,30 @@ impl All for AllGroups {}
 mod test {
     use super::*;
 
+    const TEST_PREFIX: &'static str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests");
+
+    /// Needed for the file checks, this is done by the library
+    fn test_prefix(filename: &str) -> String {
+        let mut complete = String::from(TEST_PREFIX);
+        complete.push_str(filename);
+        complete
+    }
+
+    fn test_cfg() -> Config {
+        Config::default()
+            // Since all this really does is prepend `sheme` to the consts
+            .scheme(TEST_PREFIX.to_string())
+    }
+
+    fn test_auth_cfg() -> Config {
+        test_cfg().auth(true)
+    }
+
     // *** struct.User ***
     #[test]
     #[should_panic(expected = "Hash not populated!")]
     fn wrong_attempt_set_password() {
-        let mut users = AllUsers::new(Config::default()).unwrap();
+        let mut users = AllUsers::new(test_cfg()).unwrap();
         let user = users.get_mut_by_id(1000).unwrap();
         user.set_passwd("").unwrap();
     }
@@ -1034,7 +1056,7 @@ mod test {
     #[test]
     #[should_panic(expected = "Hash not populated!")]
     fn wrong_attempt_unset_password() {
-        let mut users = AllUsers::new(Config::default()).unwrap();
+        let mut users = AllUsers::new(test_cfg()).unwrap();
         let user = users.get_mut_by_id(1000).unwrap();
         user.unset_passwd();
     }
@@ -1042,7 +1064,7 @@ mod test {
     #[test]
     #[should_panic(expected = "Hash not populated!")]
     fn wrong_attempt_verify_password() {
-        let mut users = AllUsers::new(Config::default()).unwrap();
+        let mut users = AllUsers::new(test_cfg()).unwrap();
         let user = users.get_mut_by_id(1000).unwrap();
         user.verify_passwd("hi folks");
     }
@@ -1050,7 +1072,7 @@ mod test {
     #[test]
     #[should_panic(expected = "Hash not populated!")]
     fn wrong_attempt_is_password_blank() {
-        let mut users = AllUsers::new(Config::default()).unwrap();
+        let mut users = AllUsers::new(test_cfg()).unwrap();
         let user = users.get_mut_by_id(1000).unwrap();
         user.is_passwd_blank();
     }
@@ -1058,14 +1080,14 @@ mod test {
     #[test]
     #[should_panic(expected = "Hash not populated!")]
     fn wrong_attempt_is_password_unset() {
-        let mut users = AllUsers::new(Config::default()).unwrap();
+        let mut users = AllUsers::new(test_cfg()).unwrap();
         let user = users.get_mut_by_id(1000).unwrap();
         user.is_passwd_unset();
     }
 
     #[test]
     fn attempt_user_api() {
-        let mut users = AllUsers::new(Config::with_auth()).unwrap();
+        let mut users = AllUsers::new(test_auth_cfg()).unwrap();
         let user = users.get_mut_by_id(1000).unwrap();
 
         assert_eq!(user.is_passwd_blank(), true);
@@ -1100,7 +1122,7 @@ mod test {
     // *** struct.AllUsers ***
     #[test]
     fn get_user() {
-        let users = AllUsers::new(Config::with_auth()).unwrap();
+        let users = AllUsers::new(test_auth_cfg()).unwrap();
         
         let root = users.get_by_id(0).expect("'root' user missing");
         assert_eq!(root.user, "root".to_string());
@@ -1149,7 +1171,7 @@ mod test {
 
     #[test]
     fn manip_user() {
-        let mut users = AllUsers::new(Config::with_auth()).unwrap();
+        let mut users = AllUsers::new(test_auth_cfg()).unwrap();
         // NOT testing `get_unique_id`
         let id = 7099;
         users
@@ -1157,7 +1179,7 @@ mod test {
             .expect("failed to add user 'fb'");
         //                                            weirdo ^^^^^^^^ :P
         users.save().unwrap();
-        let p_file_content = read_locked_file(PASSWD_FILE).unwrap();
+        let p_file_content = read_locked_file(test_prefix(PASSWD_FILE)).unwrap();
         assert_eq!(
             p_file_content,
             concat!(
@@ -1167,7 +1189,7 @@ mod test {
                 "fb;7099;7099;FooBar;/home/foob;/bin/zsh\n"
             )
         );
-        let s_file_content = read_locked_file(SHADOW_FILE).unwrap();
+        let s_file_content = read_locked_file(test_prefix(SHADOW_FILE)).unwrap();
         assert_eq!(s_file_content, concat!(
             "root;$argon2i$m=4096,t=10,p=1$Tnc4UVV0N00$ML9LIOujd3nmAfkAwEcSTMPqakWUF0OUiLWrIy0nGLk\n",
             "user;\n",
@@ -1181,7 +1203,7 @@ mod test {
             fb.set_passwd("").unwrap();
         }
         users.save().unwrap();
-        let p_file_content = read_locked_file(PASSWD_FILE).unwrap();
+        let p_file_content = read_locked_file(test_prefix(PASSWD_FILE)).unwrap();
         assert_eq!(
             p_file_content,
             concat!(
@@ -1191,7 +1213,7 @@ mod test {
                 "fb;7099;7099;FooBar;/home/foob;/bin/fish\n"
             )
         );
-        let s_file_content = read_locked_file(SHADOW_FILE).unwrap();
+        let s_file_content = read_locked_file(test_prefix(SHADOW_FILE)).unwrap();
         assert_eq!(s_file_content, concat!(
             "root;$argon2i$m=4096,t=10,p=1$Tnc4UVV0N00$ML9LIOujd3nmAfkAwEcSTMPqakWUF0OUiLWrIy0nGLk\n",
             "user;\n",
@@ -1201,7 +1223,7 @@ mod test {
 
         users.remove_by_id(id);
         users.save().unwrap();
-        let file_content = read_locked_file(PASSWD_FILE).unwrap();
+        let file_content = read_locked_file(test_prefix(PASSWD_FILE)).unwrap();
         assert_eq!(
             file_content,
             concat!(
@@ -1214,7 +1236,7 @@ mod test {
 
     #[test]
     fn get_group() {
-        let groups = AllGroups::new(Config::default()).unwrap();
+        let groups = AllGroups::new(test_cfg()).unwrap();
         let user = groups.get_by_name("user").unwrap();
         assert_eq!(user.group, "user");
         assert_eq!(user.gid, 1000);
@@ -1228,13 +1250,13 @@ mod test {
 
     #[test]
     fn manip_group() {
-        let mut groups = AllGroups::new(Config::default()).unwrap();
+        let mut groups = AllGroups::new(test_cfg()).unwrap();
         // NOT testing `get_unique_id`
         let id = 7099;
 
         groups.add_group("fb", id, &["fb"]).unwrap();
         groups.save().unwrap();
-        let file_content = read_locked_file(GROUP_FILE).unwrap();
+        let file_content = read_locked_file(test_prefix(GROUP_FILE)).unwrap();
         assert_eq!(
             file_content,
             concat!(
@@ -1251,7 +1273,7 @@ mod test {
             fb.users.push("user".to_string());
         }
         groups.save().unwrap();
-        let file_content = read_locked_file(GROUP_FILE).unwrap();
+        let file_content = read_locked_file(test_prefix(GROUP_FILE)).unwrap();
         assert_eq!(
             file_content,
             concat!(
@@ -1265,7 +1287,7 @@ mod test {
 
         groups.remove_by_id(id);
         groups.save().unwrap();
-        let file_content = read_locked_file(GROUP_FILE).unwrap();
+        let file_content = read_locked_file(test_prefix(GROUP_FILE)).unwrap();
         assert_eq!(
             file_content,
             concat!(
@@ -1280,7 +1302,7 @@ mod test {
     // *** Misc ***
     #[test]
     fn users_get_unused_ids() {
-        let users = AllUsers::new(Config::default()).unwrap_or_else(|err| panic!(err));
+        let users = AllUsers::new(test_cfg()).unwrap_or_else(|err| panic!(err));
         let id = users.get_unique_id().unwrap();
         if id < users.config.min_id || id > users.config.max_id {
             panic!("User ID is not between allowed margins")
@@ -1291,7 +1313,7 @@ mod test {
     
     #[test]
     fn groups_get_unused_ids() {
-        let groups = AllGroups::new(Config::default()).unwrap();
+        let groups = AllGroups::new(test_cfg()).unwrap();
         let id = groups.get_unique_id().unwrap();
         if id < groups.config.min_id || id > groups.config.max_id {
             panic!("Group ID is not between allowed margins")
