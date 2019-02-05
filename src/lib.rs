@@ -153,19 +153,19 @@ fn write_locked_file(file: impl AsRef<Path>, data: String) -> Result<()> {
 /// # Unset vs. Blank Passwords
 /// A note on unset passwords vs. blank passwords. A blank password
 /// is a hash field that is completely blank (aka, `""`). According
-/// to this crate, login is only allowed if the input password is blank
-/// as well.
+/// to this crate, successful login is only allowed if the input
+/// password is blank as well.
 ///
-/// An unset
-/// password is one whose hash is not empty (`""`), but also not a valid
-/// serialized argon2rs hashing session. This hash always returns false
-/// upon attempted verification. The most commonly used hash for an
-/// unset password is `"!"`, but this crate makes no distinction.
-/// The most common way to unset the password is to use [`unset_passwd`](struct.User.html#method.unset_passwd).
+/// An unset password is one whose hash is not empty (`""`), but
+/// also not a valid serialized argon2rs hashing session. This
+/// hash always returns `false` upon attempted verification. The
+/// most commonly used hash for an unset password is `"!"`, but
+/// this crate makes no distinction. The most common way to unset
+/// the password is to use [`unset_passwd`](struct.User.html#method.unset_passwd).
 pub struct User {
     /// Username (login name)
     pub user: String,
-    /// Hashed password and Argon2 Hashing session, stored to simplify API
+    // Hashed password and Argon2 Hashing session, stored to simplify API
     // The Outer Option<T> holds data if the user was populated with a hash
     // The Option<Encoded> is if the hash is a valid Argon Hash
     hash: Option<(String, Option<Encoded>)>,
@@ -190,8 +190,8 @@ impl User {
     /// To set the password blank, use `""` as the password parameter.
     ///
     /// # Panics
-    /// If the User's hash fields are unpopulated, this function will panic
-    /// (see [`AllUsers`](struct.AllUsers.html#shadowfile-handling) for more info)
+    /// If the User's hash fields are unpopulated, this function will `panic!`
+    /// (see [`AllUsers`](struct.AllUsers.html#shadowfile-handling) for more info).
     pub fn set_passwd(&mut self, password: impl AsRef<str>) -> Result<()> {
         self.panic_if_unpopulated();
         let password = password.as_ref();
@@ -214,24 +214,25 @@ impl User {
         Ok(())
     }
 
-    /// Unset the password (do not allow logins)
+    /// Unset the password (do not allow logins).
     ///
     /// # Panics
-    /// If the User's hash fields are unpopulated, this function will panic
-    /// (see [`AllUsers`](struct.AllUsers.html#shadowfile-handling) for more info)
+    /// If the User's hash fields are unpopulated, this function will `panic!`
+    /// (see [`AllUsers`](struct.AllUsers.html#shadowfile-handling) for more info).
     pub fn unset_passwd(&mut self) {
         self.panic_if_unpopulated();
         self.hash = Some(("!".into(), None));
     }
 
-    /// Verify the password. If the hash is empty, we only
-    /// allow login if the password field is also empty.
+    /// Verify the password. If the hash is empty, this only
+    /// returns `true` if the password field is also empty.
     /// Note that this is a blocking operation if the password
-    /// is incorrect.
+    /// is incorrect. See [`Config::auth_delay`](struct.Config.html#method.auth_delay)
+    /// to set the wait time. Default is 3 seconds.
     ///
     /// # Panics
-    /// If the User's hash fields are unpopulated, this function will panic
-    /// (see [`AllUsers`](struct.AllUsers.html#shadowfile-handling) for more info)
+    /// If the User's hash fields are unpopulated, this function will `panic!`
+    /// (see [`AllUsers`](struct.AllUsers.html#shadowfile-handling) for more info).
     pub fn verify_passwd(&self, password: impl AsRef<str>) -> bool {
         self.panic_if_unpopulated();
         // Safe because it will have panicked already if self.hash.is_none()
@@ -252,11 +253,11 @@ impl User {
     }
 
     /// Determine if the hash for the password is blank
-    /// (Any user can log in as this user with no password).
+    /// (any user can log in as this user with no password).
     ///
     /// # Panics
-    /// If the User's hash fields are unpopulated, this function will panic
-    /// (see [`AllUsers`](struct.AllUsers.html#shadowfile-handling) for more info)
+    /// If the User's hash fields are unpopulated, this function will `panic!`
+    /// (see [`AllUsers`](struct.AllUsers.html#shadowfile-handling) for more info).
     pub fn is_passwd_blank(&self) -> bool {
         self.panic_if_unpopulated();
         let &(ref hash, ref encoded) = self.hash.as_ref().unwrap();
@@ -264,11 +265,12 @@ impl User {
     }
 
     /// Determine if the hash for the password is unset
-    /// (No users can log in as this user, aka, must use sudo or su)
+    /// ([`verify_passwd`](struct.User.html#method.verify_passwd)
+    /// returns `false` regardless of input).
     ///
     /// # Panics
-    /// If the User's hash fields are unpopulated, this function will panic
-    /// (see [`AllUsers`](struct.AllUsers.html#shadowfile-handling) for more info)
+    /// If the User's hash fields are unpopulated, this function will `panic!`
+    /// (see [`AllUsers`](struct.AllUsers.html#shadowfile-handling) for more info).
     pub fn is_passwd_unset(&self) -> bool {
         self.panic_if_unpopulated();
         let &(ref hash, ref encoded) = self.hash.as_ref().unwrap();
@@ -276,16 +278,16 @@ impl User {
     }
 
     /// Get a Command to run the user's default shell
-    /// (See [`login_cmd`](struct.User.html#method.login_cmd) for more doc)
+    /// (see [`login_cmd`](struct.User.html#method.login_cmd) for more docs).
     pub fn shell_cmd(&self) -> Command { self.login_cmd(&self.shell) }
 
     /// Provide a login command for the user, which is any
     /// entry point for starting a user's session, whether
     /// a shell (use [`shell_cmd`](struct.User.html#method.shell_cmd) instead) or a graphical init.
     ///
-    /// The `Command` will have set the users UID and GID, its CWD will be
-    /// set to the users's home directory and the follwing enviroment variables will
-    /// be populated like so:
+    /// The `Command` will use the user's `uid` and `gid`, its `current_dir` will be
+    /// set to the user's home directory, and the follwing enviroment variables will
+    /// be populated:
     ///
     ///    - `USER` set to the user's `user` field.
     ///    - `UID` set to the user's `uid` field.
@@ -361,7 +363,9 @@ impl Debug for User {
 }
 
 impl Display for User {
-    /// Format this user as an entry in `/etc/passwd`
+    /// Format this user as an entry in `/etc/passwd`. This
+    /// is an implementation detail, do NOT rely on this trait
+    /// being implemented in future.
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         #[cfg_attr(rustfmt, rustfmt_skip)]
         write!(f, "{};{};{};{};{};{}",
@@ -373,7 +377,9 @@ impl Display for User {
 impl FromStr for User {
     type Err = failure::Error;
 
-    /// Parse an entry from `/etc/passwd`
+    /// Parse an entry from `/etc/passwd`. This
+    /// is an implementation detail, do NOT rely on this trait
+    /// being implemented in future.
     fn from_str(s: &str) -> Result<Self> {
         let mut parts = s.split(';');
 
@@ -411,7 +417,7 @@ impl FromStr for User {
     }
 }
 
-/// A struct representing a Redox users group.
+/// A struct representing a Redox user group.
 /// Currently maps to an `/etc/group` file entry.
 #[derive(Debug)]
 pub struct Group {
@@ -436,7 +442,9 @@ impl Id for Group {
 }
 
 impl Display for Group {
-    /// Format this group as an entry in `/etc/group`.
+    /// Format this group as an entry in `/etc/group`. This
+    /// is an implementation detail, do NOT rely on this trait
+    /// being implemented in future.
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         #[cfg_attr(rustfmt, rustfmt_skip)]
         write!(f, "{};{};{}",
@@ -450,7 +458,9 @@ impl Display for Group {
 impl FromStr for Group {
     type Err = failure::Error;
 
-    /// Parse an entry from `/etc/group`
+    /// Parse an entry from `/etc/group`. This
+    /// is an implementation detail, do NOT rely on this trait
+    /// being implemented in future.
     fn from_str(s: &str) -> Result<Self> {
         let mut parts = s.split(';');
 
@@ -670,6 +680,10 @@ mod sealed {
 
 use sealed::{AllInner, Id, Name};
 
+/// This trait is used to remove repetitive API items from
+/// [`AllGroups`] and [`AllUsers`]. It uses a hidden trait
+/// so that the implementations of functions can be implemented
+/// at the trait level. Do not try to implement this trait.
 pub trait All: AllInner {
     /// Get an iterator borrowing all [`User`](struct.User.html)'s
     /// or [`Group`](struct.Group.html)'s on the system.
@@ -700,7 +714,7 @@ pub trait All: AllInner {
             .find(|gruser| gruser.name() == name.as_ref() )
     }
     
-    /// Mutable version of ['get_by_name'](trait.All.html#method.get_by_name)
+    /// Mutable version of [`get_by_name`](trait.All.html#method.get_by_name).
     fn get_mut_by_name(&mut self, name: impl AsRef<str>) -> Option<&mut <Self as AllInner>::Gruser> {
         self.iter_mut()
             .find(|gruser| gruser.name() == name.as_ref() )
@@ -723,14 +737,14 @@ pub trait All: AllInner {
             .find(|gruser| gruser.id() == id )
     }
     
-    /// Mutable version of [`get_by_id`](trait.All.html#method.get_by_id)
+    /// Mutable version of [`get_by_id`](trait.All.html#method.get_by_id).
     fn get_mut_by_id(&mut self, id: usize) -> Option<&mut <Self as AllInner>::Gruser> {
         self.iter_mut()
             .find(|gruser| gruser.id() == id )
     }
     
-    /// Provides an unused id based on the min and max values passed to
-    /// the `All` in the [`Config`](struct.Config.html)
+    /// Provides an unused id based on the min and max values in
+    /// the [`Config`](struct.Config.html) passed to the `All`'s constructor.
     ///
     /// # Examples
     ///
@@ -775,7 +789,7 @@ pub trait All: AllInner {
 /// Note that everything in this section also applies to
 /// [`AllGroups`](struct.AllGroups.html)
 ///
-/// * If you mutate anything owned by an AllUsers,
+/// * If you mutate anything owned by an `AllUsers`,
 ///   you must call the [`save`](struct.AllUsers.html#method.save)
 ///   method in order for those changes to be applied to the system.
 /// * The API here is kept small on purpose in order to reduce the
@@ -839,8 +853,8 @@ impl AllUsers {
         })
     }
 
-    /// Adds a user with the specified attributes to the
-    /// AllUsers instance. Note that the user's password is set unset (see
+    /// Adds a user with the specified attributes to the `AllUsers`
+    /// instance. Note that the user's password is set unset (see
     /// [Unset vs Blank Passwords](struct.User.html#unset-vs-blank-passwords))
     /// during this call.
     ///
@@ -849,9 +863,10 @@ impl AllUsers {
     /// in order for the new user to be applied to the system.
     ///
     /// # Panics
-    /// This function will panic if `true` was not passed to
-    /// [`AllUsers::new`](struct.AllUsers.html#method.new) (see
-    /// [`Shadowfile handling`](struct.AllUsers.html#shadowfile-handling))
+    /// This function will `panic!` if the [`Config`](struct.Config.html)
+    /// passed to [`AllUsers::new`](struct.AllUsers.html#method.new)
+    /// does not have authentication enabled (see
+    /// [`Shadowfile handling`](struct.AllUsers.html#shadowfile-handling)).
     //TODO: Take uid/gid as Option<usize> and if none, find an unused ID.
     pub fn add_user(
         &mut self,
@@ -885,9 +900,8 @@ impl AllUsers {
         Ok(())
     }
 
-    /// Syncs the data stored in the AllUsers instance to the filesystem.
-    /// To apply changes to the system from an AllUsers, you MUST call this function!
-    /// This function currently does a bunch of fs I/O so it is error-prone.
+    /// Syncs the data stored in the `AllUsers` instance to the filesystem.
+    /// To apply changes to the system from an `AllUsers`, you MUST call this function!
     pub fn save(&self) -> Result<()> {
         let mut userstring = String::new();
         let mut shadowstring = String::new();
@@ -942,11 +956,8 @@ pub struct AllGroups {
     config: Config,
 }
 
-//UNOPTIMIZED: Right now this struct is just a Vec and we are doing O(n)
-// operations over the vec to do the `get` methods. A multi-key
-// hashmap would be a godsend here for performance.
 impl AllGroups {
-    /// Create a new AllGroups
+    /// Create a new `AllGroups`.
     //TODO: Indicate if parsing an individual line failed or not
     pub fn new(config: Config) -> Result<AllGroups> {
         let group_cntnt = read_locked_file(config.in_scheme(GROUP_FILE))?;
@@ -964,10 +975,10 @@ impl AllGroups {
         })
     }
 
-    /// Adds a group with the specified attributes to this AllGroups
+    /// Adds a group with the specified attributes to this `AllGroups`.
     ///
     /// This function is classified as a mutating operation,
-    /// and users must therefore call [`save`](struct.AllUsers.html#method.save)
+    /// and users must therefore call [`save`](struct.AllGroups.html#method.save)
     /// in order for the new group to be applied to the system.
     //TODO: Take Option<usize> for gid and find unused ID if None
     pub fn add_group(
@@ -996,9 +1007,8 @@ impl AllGroups {
         Ok(())
     }
 
-    /// Syncs the data stored in the AllGroups instance to the filesystem.
-    /// To apply changes to the AllGroups, you MUST call this function.
-    /// This function currently does a lot of fs I/O so it is error-prone.
+    /// Syncs the data stored in this `AllGroups` instance to the filesystem.
+    /// To apply changes from an `AllGroups`, you MUST call this function!
     pub fn save(&self) -> Result<()> {
         let mut groupstring = String::new();
         for group in &self.groups {
