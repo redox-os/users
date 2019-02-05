@@ -340,7 +340,7 @@ impl User {
 
 impl Name for User {
     fn name(&self) -> &str {
-        &self.name
+        &self.user
     }
 }
 
@@ -691,7 +691,7 @@ pub trait All: AllInner {
     /// Basic usage:
     ///
     /// ```no_run
-    /// # use redox_users::{AllUsers, Config};
+    /// # use redox_users::{All, AllUsers, Config};
     /// let users = AllUsers::new(Config::default()).unwrap();
     /// let user = users.get_by_name("root").unwrap();
     /// ```
@@ -714,7 +714,7 @@ pub trait All: AllInner {
     /// Basic usage:
     ///
     /// ```no_run
-    /// # use redox_users::{AllUsers, Config};
+    /// # use redox_users::{All, AllUsers, Config};
     /// let users = AllUsers::new(Config::default()).unwrap();
     /// let user = users.get_by_id(0).unwrap();
     /// ```
@@ -734,8 +734,8 @@ pub trait All: AllInner {
     ///
     /// # Examples
     ///
-    /// ```
-    /// # use redox_users::{AllUsers, Config};
+    /// ```no_run
+    /// # use redox_users::{All, AllUsers, Config};
     /// let users = AllUsers::new(Config::default()).unwrap();
     /// let uid = users.get_unique_id().expect("no available uid");
     /// ```
