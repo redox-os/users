@@ -27,7 +27,7 @@
 //! software.
 
 extern crate argon2rs;
-extern crate rand;
+extern crate rand_os;
 extern crate syscall;
 #[macro_use]
 extern crate failure;
@@ -48,8 +48,8 @@ use std::time::Duration;
 use argon2rs::verifier::Encoded;
 use argon2rs::{Argon2, Variant};
 use failure::Error;
-use rand::RngCore;
-use rand::os::OsRng;
+use rand_os::OsRng;
+use rand_os::rand_core::RngCore;
 use syscall::Error as SyscallError;
 #[cfg(target_os = "redox")]
 use syscall::flag::{O_EXLOCK, O_SHLOCK};
