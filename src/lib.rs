@@ -354,7 +354,7 @@ impl Debug for User {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f,
             "User {{\n\tuser: {:?}\n\tuid: {:?}\n\tgid: {:?}\n\tname: {:?}
-            \thome: {:?}\n\tshell: {:?}\n\tauth_delay: {:?}\n}}",
+            home: {:?}\n\tshell: {:?}\n\tauth_delay: {:?}\n}}",
             self.user, self.uid, self.gid, self.name, self.home, self.shell, self.auth_delay
         )
     }
@@ -924,6 +924,12 @@ impl AllInner for AllUsers {
 
 impl All for AllUsers {}
 
+impl Debug for AllUsers {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "AllUsers {{\nusers: {:?}\n}}", self.users)
+    }
+}
+
 /// [`AllGroups`](struct.AllGroups.html) provides
 /// (borrowed) access to all groups on the system. Note that this
 /// struct implements [`All`](trait.All.html), for a bunch of convenience
@@ -1152,6 +1158,7 @@ mod test {
             &Some(_) => panic!("Should not be an argon hash!"),
             &None => ()
         }
+        println!("{:?}", users);
 
         let li = users.get_by_name("li").expect("'li' user missing");
         println!("got li");
@@ -1198,6 +1205,7 @@ mod test {
         ));
 
         {
+            println!("{:?}", users);
             let fb = users.get_mut_by_name("fb").expect("'fb' user missing");
             fb.shell = "/bin/fish".to_string(); // That's better
             fb.set_passwd("").unwrap();
