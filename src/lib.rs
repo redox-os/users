@@ -26,7 +26,7 @@
 //! schemes for redox in future without breakage of existing
 //! software.
 
-extern crate argon2rs;
+extern crate argon2;
 extern crate rand_os;
 extern crate syscall;
 #[macro_use]
@@ -43,11 +43,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::slice::{Iter, IterMut};
 use std::str::FromStr;
+#[cfg(not(test))]
 use std::thread;
 use std::time::Duration;
 
-use argon2rs::verifier::Encoded;
-use argon2rs::{Argon2, Variant};
 use failure::Error;
 use rand_os::OsRng;
 use rand_os::rand_core::RngCore;
@@ -108,7 +107,7 @@ impl From<SyscallError> for UsersError {
 fn read_locked_file(file: impl AsRef<Path>) -> Result<String> {
     #[cfg(test)]
     println!("Reading file: {}", file.as_ref().display());
-    
+
     #[cfg(target_os = "redox")]
     let mut file = OpenOptions::new()
         .read(true)
@@ -129,7 +128,7 @@ fn read_locked_file(file: impl AsRef<Path>) -> Result<String> {
 fn write_locked_file(file: impl AsRef<Path>, data: String) -> Result<()> {
     #[cfg(test)]
     println!("Writing file: {}", file.as_ref().display());
-    
+
     #[cfg(target_os = "redox")]
     let mut file = OpenOptions::new()
         .write(true)
@@ -165,10 +164,8 @@ fn write_locked_file(file: impl AsRef<Path>, data: String) -> Result<()> {
 pub struct User {
     /// Username (login name)
     pub user: String,
-    // Hashed password and Argon2 Hashing session, stored to simplify API
-    // The Outer Option<T> holds data if the user was populated with a hash
-    // The Option<Encoded> is if the hash is a valid Argon Hash
-    hash: Option<(String, Option<Encoded>)>,
+    // Hashed password and Argon2 indicator, stored to simplify API
+    hash: Option<(String, bool)>,
     /// User id
     pub uid: usize,
     /// Group id
@@ -197,19 +194,12 @@ impl User {
         let password = password.as_ref();
 
         self.hash = if password != "" {
-            let a2 = Argon2::new(10, 1, 4096, Variant::Argon2i)?;
             let salt = format!("{:X}", OsRng::new()?.next_u64());
-            let enc = Encoded::new(
-                a2,
-                password.as_bytes(),
-                salt.as_bytes(),
-                &[],
-                &[]
-            );
-
-            Some((String::from_utf8(enc.to_u8())?, Some(enc)))
+            let config = argon2::Config::default();
+            let hash = argon2::hash_encoded(password.as_bytes(), salt.as_bytes(), &config)?;
+            Some((hash, true))
         } else {
-            Some(("".into(), None))
+            Some(("".into(), false))
         };
         Ok(())
     }
@@ -221,7 +211,7 @@ impl User {
     /// (see [`AllUsers`](struct.AllUsers.html#shadowfile-handling) for more info).
     pub fn unset_passwd(&mut self) {
         self.panic_if_unpopulated();
-        self.hash = Some(("!".into(), None));
+        self.hash = Some(("!".into(), false));
     }
 
     /// Verify the password. If the hash is empty, this only
@@ -239,8 +229,8 @@ impl User {
         let &(ref hash, ref encoded) = self.hash.as_ref().unwrap();
         let password = password.as_ref();
 
-        let verified = if let &Some(ref encoded) = encoded {
-            encoded.verify(password.as_bytes())
+        let verified = if *encoded {
+            argon2::verify_encoded(&hash, password.as_bytes()).unwrap()
         } else {
             hash == "" && password == ""
         };
@@ -261,7 +251,7 @@ impl User {
     pub fn is_passwd_blank(&self) -> bool {
         self.panic_if_unpopulated();
         let &(ref hash, ref encoded) = self.hash.as_ref().unwrap();
-        hash == "" && encoded.is_none()
+        hash == "" && ! encoded
     }
 
     /// Determine if the hash for the password is unset
@@ -274,7 +264,7 @@ impl User {
     pub fn is_passwd_unset(&self) -> bool {
         self.panic_if_unpopulated();
         let &(ref hash, ref encoded) = self.hash.as_ref().unwrap();
-        hash != "" && encoded.is_none()
+        hash != "" && ! encoded
     }
 
     /// Get a Command to run the user's default shell
@@ -324,9 +314,9 @@ impl User {
     /// Give this a hash string (not a shadowfile entry!!!)
     fn populate_hash(&mut self, hash: &str) -> Result<()> {
         let encoded = match hash {
-            "" => None,
-            "!" => None,
-            _ => Some(Encoded::from_u8(hash.as_bytes())?)
+            "" => false,
+            "!" => false,
+            _ => true,
         };
         self.hash = Some((hash.to_string(), encoded));
         Ok(())
@@ -592,31 +582,31 @@ impl Config {
             ..Default::default()
         }
     }
-    
+
     /// Builder pattern version of `Self::with_auth`.
     pub fn auth(mut self, auth: bool) -> Config {
         self.auth_enabled = auth;
         self
     }
-    
+
     /// Set the delay for a failed authentication. Default is 3 seconds.
     pub fn auth_delay(mut self, delay: Duration) -> Config {
         self.auth_delay = delay;
         self
     }
-    
+
     /// Set the smallest ID possible to use when finding an unused ID.
     pub fn min_id(mut self, id: usize) -> Config {
         self.min_id = id;
         self
     }
-    
+
     /// Set the largest possible ID to use when finding an unused ID.
     pub fn max_id(mut self, id: usize) -> Config {
         self.max_id = id;
         self
     }
-    
+
     /// Set the scheme relative to which the `AllUsers` or `AllGroups`
     /// should be looking for its data files. This is a compromise between
     /// exposing implementation details and providing fine enough
@@ -625,7 +615,7 @@ impl Config {
         self.scheme = scheme;
         self
     }
-    
+
     // Prepend a path with the scheme in this Config
     fn in_scheme(&self, path: impl AsRef<Path>) -> PathBuf {
         let mut canonical_path = PathBuf::from(&self.scheme);
@@ -657,7 +647,7 @@ impl Default for Config {
 // "leaking" `AllInner`
 mod sealed {
     use Config;
-    
+
     pub trait Name {
         fn name(&self) -> &str;
     }
@@ -665,11 +655,11 @@ mod sealed {
     pub trait Id {
         fn id(&self) -> usize;
     }
-    
+
     pub trait AllInner {
         // Group+User, thanks Dad
         type Gruser: Name + Id;
-        
+
         /// These functions grab internal elements so that the other
         /// methods of `All` can manipulate them.
         fn list(&self) -> &Vec<Self::Gruser>;
@@ -690,13 +680,13 @@ pub trait All: AllInner {
     fn iter(&self) -> Iter<<Self as AllInner>::Gruser> {
         self.list().iter()
     }
-    
+
     /// Get an iterator mutably borrowing all [`User`](struct.User.html)'s
     /// or [`Group`](struct.Group.html)'s on the system.
     fn iter_mut(&mut self) -> IterMut<<Self as AllInner>::Gruser> {
         self.list_mut().iter_mut()
     }
-    
+
     /// Borrow the [`User`](struct.User.html) or [`Group`](struct.Group.html)
     /// with a given name.
     ///
@@ -713,13 +703,13 @@ pub trait All: AllInner {
         self.iter()
             .find(|gruser| gruser.name() == name.as_ref() )
     }
-    
+
     /// Mutable version of [`get_by_name`](trait.All.html#method.get_by_name).
     fn get_mut_by_name(&mut self, name: impl AsRef<str>) -> Option<&mut <Self as AllInner>::Gruser> {
         self.iter_mut()
             .find(|gruser| gruser.name() == name.as_ref() )
     }
-    
+
     /// Borrow the [`User`](struct.User.html) or [`Group`](struct.Group.html)
     /// with the given ID.
     ///
@@ -736,13 +726,13 @@ pub trait All: AllInner {
         self.iter()
             .find(|gruser| gruser.id() == id )
     }
-    
+
     /// Mutable version of [`get_by_id`](trait.All.html#method.get_by_id).
     fn get_mut_by_id(&mut self, id: usize) -> Option<&mut <Self as AllInner>::Gruser> {
         self.iter_mut()
             .find(|gruser| gruser.id() == id )
     }
-    
+
     /// Provides an unused id based on the min and max values in
     /// the [`Config`](struct.Config.html) passed to the `All`'s constructor.
     ///
@@ -761,7 +751,7 @@ pub trait All: AllInner {
         }
         None
     }
-    
+
     /// Remove a [`User`](struct.User.html) or [`Group`](struct.Group.html)
     /// from this `All` given it's name. This won't provide an indication
     /// of whether the user was removed or not, but is guaranteed to work
@@ -772,7 +762,7 @@ pub trait All: AllInner {
         self.list_mut()
             .retain(|gruser| gruser.name() != name.as_ref() );
     }
-    
+
     /// Id version of [`remove_by_name`](trait.All.html#method.remove_by_name).
     fn remove_by_id(&mut self, id: usize) {
         self.list_mut()
@@ -889,7 +879,7 @@ impl AllUsers {
 
         self.users.push(User {
             user: login.into(),
-            hash: Some(("!".into(), None)),
+            hash: Some(("!".into(), false)),
             uid,
             gid,
             name: name.into(),
@@ -922,15 +912,15 @@ impl AllUsers {
 
 impl AllInner for AllUsers {
     type Gruser = User;
-    
+
     fn list(&self) -> &Vec<Self::Gruser> {
         &self.users
     }
-    
+
     fn list_mut(&mut self) -> &mut Vec<Self::Gruser> {
         &mut self.users
     }
-    
+
     fn config(&self) -> &Config {
         &self.config
     }
@@ -1021,15 +1011,15 @@ impl AllGroups {
 
 impl AllInner for AllGroups {
     type Gruser = Group;
-    
+
     fn list(&self) -> &Vec<Self::Gruser> {
         &self.groups
     }
-    
+
     fn list_mut(&mut self) -> &mut Vec<Self::Gruser> {
         &mut self.groups
     }
-    
+
     fn config(&self) -> &Config {
         &self.config
     }
@@ -1041,7 +1031,7 @@ impl All for AllGroups {}
 mod test {
     use super::*;
 
-    const TEST_PREFIX: &'static str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests");
+    const TEST_PREFIX: &'static str = "tests";
 
     /// Needed for the file checks, this is done by the library
     fn test_prefix(filename: &str) -> String {
@@ -1139,7 +1129,7 @@ mod test {
     #[test]
     fn get_user() {
         let users = AllUsers::new(test_auth_cfg()).unwrap();
-        
+
         let root = users.get_by_id(0).expect("'root' user missing");
         assert_eq!(root.user, "root".to_string());
         let &(ref hashstring, ref encoded) = root.hash.as_ref().expect("'root' hash is None");
@@ -1151,8 +1141,8 @@ mod test {
         assert_eq!(root.home, "file:/root".to_string());
         assert_eq!(root.shell, "file:/bin/ion".to_string());
         match encoded {
-            &Some(_) => (),
-            &None => panic!("Expected encoded argon hash!")
+            true => (),
+            false => panic!("Expected encoded argon hash!")
         }
 
         let user = users.get_by_name("user").expect("'user' user missing");
@@ -1165,8 +1155,8 @@ mod test {
         assert_eq!(user.home, "file:/home/user".to_string());
         assert_eq!(user.shell, "file:/bin/ion".to_string());
         match encoded {
-            &Some(_) => panic!("Should not be an argon hash!"),
-            &None => ()
+            true => panic!("Should not be an argon hash!"),
+            false => ()
         }
         println!("{:?}", users);
 
@@ -1181,8 +1171,8 @@ mod test {
         assert_eq!(li.home, "file:/home/lorem".to_string());
         assert_eq!(li.shell, "file:/bin/ion".to_string());
         match encoded {
-            &Some(_) => panic!("Should not be an argon hash!"),
-            &None => ()
+            true => panic!("Should not be an argon hash!"),
+            false => ()
         }
     }
 
@@ -1328,7 +1318,7 @@ mod test {
             panic!("User ID is used!");
         }
     }
-    
+
     #[test]
     fn groups_get_unused_ids() {
         let groups = AllGroups::new(test_cfg()).unwrap();
