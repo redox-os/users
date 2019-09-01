@@ -11,5 +11,5 @@ keywords = ["redox", "auth"]
 
 [dependencies]
 rust-argon2 = "0.5"
-rand = "0.7"
+getrandom = "0.1"
 redox_syscall = "0.1"
