@@ -13,4 +13,3 @@ keywords = ["redox", "auth"]
 rust-argon2 = "0.5"
 rand_os = "0.1"
 redox_syscall = "0.1"
-failure = "0.1.1"

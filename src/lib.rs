@@ -29,10 +29,9 @@
 extern crate argon2;
 extern crate rand_os;
 extern crate syscall;
-#[macro_use]
-extern crate failure;
 
 use std::convert::From;
+use std::error::Error;
 use std::fmt::{self, Debug, Display};
 use std::fs::OpenOptions;
 use std::io::{Read, Write};
@@ -47,12 +46,11 @@ use std::str::FromStr;
 use std::thread;
 use std::time::Duration;
 
-use failure::Error;
-use rand_os::OsRng;
 use rand_os::rand_core::RngCore;
-use syscall::Error as SyscallError;
+use rand_os::OsRng;
 #[cfg(target_os = "redox")]
 use syscall::flag::{O_EXLOCK, O_SHLOCK};
+use syscall::Error as SyscallError;
 
 const PASSWD_FILE: &'static str = "/etc/passwd";
 const GROUP_FILE: &'static str = "/etc/group";
@@ -67,19 +65,34 @@ const MIN_ID: usize = 1000;
 const MAX_ID: usize = 6000;
 const DEFAULT_TIMEOUT: u64 = 3;
 
-pub type Result<T> = std::result::Result<T, Error>;
+pub type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
 /// Errors that might happen while using this crate
-#[derive(Debug, Fail, PartialEq)]
+#[derive(Debug, PartialEq)]
 pub enum UsersError {
-    #[fail(display = "os error: code {}", reason)]
     Os { reason: String },
-    #[fail(display = "parse error: {}", reason)]
     Parsing { reason: String },
-    #[fail(display = "user/group not found")]
     NotFound,
-    #[fail(display = "user/group already exists")]
     AlreadyExists
+}
+
+impl fmt::Display for UsersError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            UsersError::Os { reason } => write!(f, "os error: code {}", reason),
+            UsersError::Parsing { reason } => {
+                write!(f, "parse error: {}", reason)
+            },
+            UsersError::NotFound => write!(f, "user/group not found"),
+            UsersError::AlreadyExists => write!(f, "user/group already exists")
+        }
+    }
+}
+
+impl Error for UsersError {
+    fn description(&self) -> &str { "UsersError" }
+
+    fn cause(&self) -> Option<&dyn Error> { None }
 }
 
 #[inline]
@@ -177,7 +190,7 @@ pub struct User {
     /// Shell path
     pub shell: String,
     /// Failed login delay duration
-    auth_delay: Duration,
+    auth_delay: Duration
 }
 
 impl User {
@@ -365,7 +378,7 @@ impl Display for User {
 }
 
 impl FromStr for User {
-    type Err = failure::Error;
+    type Err = Box<dyn Error>;
 
     /// Parse an entry from `/etc/passwd`. This
     /// is an implementation detail, do NOT rely on this trait
@@ -446,7 +459,7 @@ impl Display for Group {
 }
 
 impl FromStr for Group {
-    type Err = failure::Error;
+    type Err = Box<dyn Error>;
 
     /// Parse an entry from `/etc/group`. This
     /// is an implementation detail, do NOT rely on this trait
@@ -1310,7 +1323,7 @@ mod test {
     // *** Misc ***
     #[test]
     fn users_get_unused_ids() {
-        let users = AllUsers::new(test_cfg()).unwrap_or_else(|err| panic!(err));
+        let users = AllUsers::new(test_cfg()).unwrap();
         let id = users.get_unique_id().unwrap();
         if id < users.config.min_id || id > users.config.max_id {
             panic!("User ID is not between allowed margins")
