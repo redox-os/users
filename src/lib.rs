@@ -27,7 +27,7 @@
 //! software.
 
 extern crate argon2;
-extern crate rand_os;
+extern crate rand;
 extern crate syscall;
 
 use std::convert::From;
@@ -46,8 +46,9 @@ use std::str::FromStr;
 use std::thread;
 use std::time::Duration;
 
-use rand_os::rand_core::RngCore;
-use rand_os::OsRng;
+use rand::rngs::{OsRng, StdRng};
+use rand::{RngCore, SeedableRng};
+
 #[cfg(target_os = "redox")]
 use syscall::flag::{O_EXLOCK, O_SHLOCK};
 use syscall::Error as SyscallError;
@@ -65,7 +66,7 @@ const MIN_ID: usize = 1000;
 const MAX_ID: usize = 6000;
 const DEFAULT_TIMEOUT: u64 = 3;
 
-pub type Result<T> = std::result::Result<T, Box<dyn Error>>;
+pub type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
 
 /// Errors that might happen while using this crate
 #[derive(Debug, PartialEq)]
@@ -207,9 +208,13 @@ impl User {
         let password = password.as_ref();
 
         self.hash = if password != "" {
-            let salt = format!("{:X}", OsRng::new()?.next_u64());
+            let salt = format!("{:X}", OsRng.next_u64());
             let config = argon2::Config::default();
-            let hash = argon2::hash_encoded(password.as_bytes(), salt.as_bytes(), &config)?;
+            let hash = argon2::hash_encoded(
+                password.as_bytes(),
+                salt.as_bytes(),
+                &config
+            )?;
             Some((hash, true))
         } else {
             Some(("".into(), false))
@@ -378,7 +383,7 @@ impl Display for User {
 }
 
 impl FromStr for User {
-    type Err = Box<dyn Error>;
+    type Err = Box<dyn Error + Send + Sync>;
 
     /// Parse an entry from `/etc/passwd`. This
     /// is an implementation detail, do NOT rely on this trait
@@ -459,7 +464,7 @@ impl Display for Group {
 }
 
 impl FromStr for Group {
-    type Err = Box<dyn Error>;
+    type Err = Box<dyn Error + Send + Sync>;
 
     /// Parse an entry from `/etc/group`. This
     /// is an implementation detail, do NOT rely on this trait
