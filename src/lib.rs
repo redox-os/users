@@ -27,7 +27,7 @@
 //! software.
 
 extern crate argon2;
-extern crate rand_os;
+extern crate getrandom;
 extern crate syscall;
 #[macro_use]
 extern crate failure;
@@ -48,8 +48,6 @@ use std::thread;
 use std::time::Duration;
 
 use failure::Error;
-use rand_os::OsRng;
-use rand_os::rand_core::RngCore;
 use syscall::Error as SyscallError;
 #[cfg(target_os = "redox")]
 use syscall::flag::{O_EXLOCK, O_SHLOCK};
@@ -194,7 +192,9 @@ impl User {
         let password = password.as_ref();
 
         self.hash = if password != "" {
-            let salt = format!("{:X}", OsRng::new()?.next_u64());
+            let mut buf = [0; 8];
+            getrandom::getrandom(&mut buf)?;
+            let salt = format!("{:X}", u64::from_ne_bytes(buf));
             let config = argon2::Config::default();
             let hash = argon2::hash_encoded(password.as_bytes(), salt.as_bytes(), &config)?;
             Some((hash, true))
