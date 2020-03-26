@@ -10,6 +10,6 @@ readme = "README.md"
 keywords = ["redox", "auth"]
 
 [dependencies]
-rust-argon2 = "0.7"
+rust-argon2 = "0.8"
 getrandom = "0.1"
 redox_syscall = "0.1"
