@@ -10,6 +10,14 @@ readme = "README.md"
 keywords = ["redox", "auth"]
 
 [dependencies]
-rust-argon2 = "0.8"
+rust-argon2 = { version = "0.8", optional = true }
 getrandom = "0.1"
 redox_syscall = "0.1"
+
+[features]
+default = ["auth"]
+
+# Enable password authentication using argon2. Some API may not be available
+# without default features.
+auth = ["rust-argon2"]
+

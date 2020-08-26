@@ -20,7 +20,9 @@ test:linux:
     stage: test
     dependencies:
         - build:linux
-    script: cargo +nightly test --verbose
+    script:
+        - cargo +nightly test --verbose
+        - cargo +nightly test --verbose --no-default-features
 
 test:redox:
     stage: test
