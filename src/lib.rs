@@ -36,6 +36,7 @@ use std::error::Error;
 use std::fmt::{self, Debug, Display};
 use std::fs::OpenOptions;
 use std::io::{Read, Write};
+use std::marker::PhantomData;
 #[cfg(target_os = "redox")]
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::process::CommandExt;
@@ -54,6 +55,7 @@ use syscall::Error as SyscallError;
 
 const PASSWD_FILE: &'static str = "/etc/passwd";
 const GROUP_FILE: &'static str = "/etc/group";
+#[cfg(feature = "auth")]
 const SHADOW_FILE: &'static str = "/etc/shadow";
 
 #[cfg(target_os = "redox")]
@@ -64,6 +66,9 @@ const DEFAULT_SCHEME: &'static str = "";
 const MIN_ID: usize = 1000;
 const MAX_ID: usize = 6000;
 const DEFAULT_TIMEOUT: u64 = 3;
+
+#[cfg(feature = "auth")]
+const USER_AUTH_FULL_EXPECTED_HASH: &str = "A User<auth::Full> had no hash";
 
 pub type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
 
@@ -159,6 +164,12 @@ fn write_locked_file(file: impl AsRef<Path>, data: String) -> Result<()> {
     Ok(())
 }
 
+pub mod auth {
+    pub struct Basic {}
+    #[cfg(feature = "auth")]
+    pub struct Full {}
+}
+
 /// A struct representing a Redox user.
 /// Currently maps to an entry in the `/etc/passwd` file.
 ///
@@ -174,11 +185,9 @@ fn write_locked_file(file: impl AsRef<Path>, data: String) -> Result<()> {
 /// most commonly used hash for an unset password is `"!"`, but
 /// this crate makes no distinction. The most common way to unset
 /// the password is to use [`unset_passwd`](struct.User.html#method.unset_passwd).
-pub struct User {
+pub struct User<A> {
     /// Username (login name)
     pub user: String,
-    // Hashed password and Argon2 indicator, stored to simplify API
-    hash: Option<(String, bool)>,
     /// User id
     pub uid: usize,
     /// Group id
@@ -189,105 +198,17 @@ pub struct User {
     pub home: String,
     /// Shell path
     pub shell: String,
-    /// Failed login delay duration
+    
+    // Hashed password and Argon2 indicator, stored to simplify API
+    #[cfg(feature = "auth")]
+    hash: Option<(String, bool)>,
+    // Marker
+    auth: PhantomData<A>,
+    // Failed login delay duration
     auth_delay: Duration
 }
 
-impl User {
-    /// Set the password for a user. Make sure the password you have
-    /// received is actually what the user wants as their password (this doesn't).
-    ///
-    /// To set the password blank, use `""` as the password parameter.
-    ///
-    /// # Panics
-    /// If the User's hash fields are unpopulated, this function will `panic!`
-    /// (see [`AllUsers`](struct.AllUsers.html#shadowfile-handling) for more info).
-    #[cfg(feature = "auth")]
-    pub fn set_passwd(&mut self, password: impl AsRef<str>) -> Result<()> {
-        self.panic_if_unpopulated();
-        let password = password.as_ref();
-
-        self.hash = if password != "" {
-            let mut buf = [0u8; 8];
-            getrandom::getrandom(&mut buf)?;
-            let salt = format!("{:X}", u64::from_ne_bytes(buf));
-            let config = argon2::Config::default();
-            let hash = argon2::hash_encoded(
-                password.as_bytes(),
-                salt.as_bytes(),
-                &config
-            )?;
-            Some((hash, true))
-        } else {
-            Some(("".into(), false))
-        };
-        Ok(())
-    }
-
-    /// Unset the password (do not allow logins).
-    ///
-    /// # Panics
-    /// If the User's hash fields are unpopulated, this function will `panic!`
-    /// (see [`AllUsers`](struct.AllUsers.html#shadowfile-handling) for more info).
-    pub fn unset_passwd(&mut self) {
-        self.panic_if_unpopulated();
-        self.hash = Some(("!".into(), false));
-    }
-
-    /// Verify the password. If the hash is empty, this only
-    /// returns `true` if the password field is also empty.
-    /// Note that this is a blocking operation if the password
-    /// is incorrect. See [`Config::auth_delay`](struct.Config.html#method.auth_delay)
-    /// to set the wait time. Default is 3 seconds.
-    ///
-    /// # Panics
-    /// If the User's hash fields are unpopulated, this function will `panic!`
-    /// (see [`AllUsers`](struct.AllUsers.html#shadowfile-handling) for more info).
-    #[cfg(feature = "auth")]
-    pub fn verify_passwd(&self, password: impl AsRef<str>) -> bool {
-        self.panic_if_unpopulated();
-        // Safe because it will have panicked already if self.hash.is_none()
-        let &(ref hash, ref encoded) = self.hash.as_ref().unwrap();
-        let password = password.as_ref();
-
-        let verified = if *encoded {
-            argon2::verify_encoded(&hash, password.as_bytes()).unwrap()
-        } else {
-            hash == "" && password == ""
-        };
-
-        if !verified {
-            #[cfg(not(test))] // Make tests run faster
-            thread::sleep(self.auth_delay);
-        }
-        verified
-    }
-
-    /// Determine if the hash for the password is blank
-    /// (any user can log in as this user with no password).
-    ///
-    /// # Panics
-    /// If the User's hash fields are unpopulated, this function will `panic!`
-    /// (see [`AllUsers`](struct.AllUsers.html#shadowfile-handling) for more info).
-    pub fn is_passwd_blank(&self) -> bool {
-        self.panic_if_unpopulated();
-        let &(ref hash, ref encoded) = self.hash.as_ref().unwrap();
-        hash == "" && ! encoded
-    }
-
-    /// Determine if the hash for the password is unset
-    /// ([`verify_passwd`](struct.User.html#method.verify_passwd)
-    /// returns `false` regardless of input).
-    ///
-    /// # Panics
-    /// If the User's hash fields are unpopulated, this function will `panic!`
-    /// (see [`AllUsers`](struct.AllUsers.html#shadowfile-handling) for more info).
-    pub fn is_passwd_unset(&self) -> bool {
-        self.panic_if_unpopulated();
-        let &(ref hash, ref encoded) = self.hash.as_ref().unwrap();
-        hash != "" && ! encoded
-    }
-
+impl<A> User<A> {
     /// Get a Command to run the user's default shell
     /// (see [`login_cmd`](struct.User.html#method.login_cmd) for more docs).
     pub fn shell_cmd(&self) -> Command { self.login_cmd(&self.shell) }
@@ -320,78 +241,8 @@ impl User {
             .env("SHELL", &self.shell);
         command
     }
-
-    /// This returns an entry for `/etc/shadow`
-    /// Will panic!
-    fn shadowstring(&self) -> String {
-        self.panic_if_unpopulated();
-        let hashstring = match self.hash {
-            Some((ref hash, _)) => hash,
-            None => panic!("Shadowfile not read!")
-        };
-        format!("{};{}", self.user, hashstring)
-    }
-
-    /// Give this a hash string (not a shadowfile entry!!!)
-    fn populate_hash(&mut self, hash: &str) -> Result<()> {
-        let encoded = match hash {
-            "" => false,
-            "!" => false,
-            _ => true,
-        };
-        self.hash = Some((hash.to_string(), encoded));
-        Ok(())
-    }
-
-    #[inline]
-    fn panic_if_unpopulated(&self) {
-        if self.hash.is_none() {
-            panic!("Hash not populated!");
-        }
-    }
-}
-
-impl Name for User {
-    fn name(&self) -> &str {
-        &self.user
-    }
-}
-
-impl Id for User {
-    fn id(&self) -> usize {
-        self.uid
-    }
-}
-
-impl Debug for User {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f,
-            "User {{\n\tuser: {:?}\n\tuid: {:?}\n\tgid: {:?}\n\tname: {:?}
-            home: {:?}\n\tshell: {:?}\n\tauth_delay: {:?}\n}}",
-            self.user, self.uid, self.gid, self.name, self.home, self.shell, self.auth_delay
-        )
-    }
-}
-
-impl Display for User {
-    /// Format this user as an entry in `/etc/passwd`. This
-    /// is an implementation detail, do NOT rely on this trait
-    /// being implemented in future.
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        #[cfg_attr(rustfmt, rustfmt_skip)]
-        write!(f, "{};{};{};{};{};{}",
-            self.user, self.uid, self.gid, self.name, self.home, self.shell
-        )
-    }
-}
-
-impl FromStr for User {
-    type Err = Box<dyn Error + Send + Sync>;
-
-    /// Parse an entry from `/etc/passwd`. This
-    /// is an implementation detail, do NOT rely on this trait
-    /// being implemented in future.
-    fn from_str(s: &str) -> Result<Self> {
+    
+    fn from_passwd_entry(s: &str) -> Result<Self> {
         let mut parts = s.split(';');
 
         let user = parts
@@ -415,16 +266,163 @@ impl FromStr for User {
             .next()
             .ok_or(parse_error("expected shell path"))?;
 
-        Ok(User {
+        Ok(User::<A> {
             user: user.into(),
-            hash: None,
             uid,
             gid,
             name: name.into(),
             home: home.into(),
             shell: shell.into(),
+            #[cfg(feature = "auth")]
+            hash: None,
+            auth: PhantomData,
             auth_delay: Duration::default(),
         })
+    }
+}
+
+#[cfg(feature = "auth")]
+impl User<auth::Full> {
+    /// Set the password for a user. Make sure the password you have
+    /// received is actually what the user wants as their password (this doesn't).
+    ///
+    /// To set the password blank, use `""` as the password parameter.
+    ///
+    /// # Panics
+    /// If the User's hash fields are unpopulated, this function will `panic!`
+    /// (see [`AllUsers`](struct.AllUsers.html#shadowfile-handling) for more info).
+    pub fn set_passwd(&mut self, password: impl AsRef<str>) -> Result<()> {
+        let password = password.as_ref();
+
+        self.hash = if password != "" {
+            let mut buf = [0u8; 8];
+            getrandom::getrandom(&mut buf)?;
+            let salt = format!("{:X}", u64::from_ne_bytes(buf));
+            let config = argon2::Config::default();
+            let hash = argon2::hash_encoded(
+                password.as_bytes(),
+                salt.as_bytes(),
+                &config
+            )?;
+            Some((hash, true))
+        } else {
+            Some(("".into(), false))
+        };
+        Ok(())
+    }
+
+    /// Unset the password (do not allow logins).
+    ///
+    /// # Panics
+    /// If the User's hash fields are unpopulated, this function will `panic!`
+    /// (see [`AllUsers`](struct.AllUsers.html#shadowfile-handling) for more info).
+    pub fn unset_passwd(&mut self) {
+        self.hash = Some(("!".into(), false));
+    }
+
+    /// Verify the password. If the hash is empty, this only
+    /// returns `true` if the password field is also empty.
+    /// Note that this is a blocking operation if the password
+    /// is incorrect. See [`Config::auth_delay`](struct.Config.html#method.auth_delay)
+    /// to set the wait time. Default is 3 seconds.
+    ///
+    /// # Panics
+    /// If the User's hash fields are unpopulated, this function will `panic!`
+    /// (see [`AllUsers`](struct.AllUsers.html#shadowfile-handling) for more info).
+    pub fn verify_passwd(&self, password: impl AsRef<str>) -> bool {
+        let &(ref hash, ref encoded) = self.hash.as_ref()
+            .expect(USER_AUTH_FULL_EXPECTED_HASH);
+        let password = password.as_ref();
+
+        let verified = if *encoded {
+            argon2::verify_encoded(&hash, password.as_bytes()).unwrap()
+        } else {
+            hash == "" && password == ""
+        };
+
+        if !verified {
+            #[cfg(not(test))] // Make tests run faster
+            thread::sleep(self.auth_delay);
+        }
+        verified
+    }
+
+    /// Determine if the hash for the password is blank
+    /// (any user can log in as this user with no password).
+    ///
+    /// # Panics
+    /// If the User's hash fields are unpopulated, this function will `panic!`
+    /// (see [`AllUsers`](struct.AllUsers.html#shadowfile-handling) for more info).
+    pub fn is_passwd_blank(&self) -> bool {
+        let &(ref hash, ref encoded) = self.hash.as_ref()
+            .expect(USER_AUTH_FULL_EXPECTED_HASH);
+        hash == "" && ! encoded
+    }
+
+    /// Determine if the hash for the password is unset
+    /// ([`verify_passwd`](struct.User.html#method.verify_passwd)
+    /// returns `false` regardless of input).
+    ///
+    /// # Panics
+    /// If the User's hash fields are unpopulated, this function will `panic!`
+    /// (see [`AllUsers`](struct.AllUsers.html#shadowfile-handling) for more info).
+    pub fn is_passwd_unset(&self) -> bool {
+        let &(ref hash, ref encoded) = self.hash.as_ref()
+            .expect(USER_AUTH_FULL_EXPECTED_HASH);
+        hash != "" && ! encoded
+    }
+
+    fn shadow_entry(&self) -> String {
+        let hashstring = match self.hash {
+            Some((ref hash, _)) => hash,
+            None => panic!(USER_AUTH_FULL_EXPECTED_HASH)
+        };
+        format!("{};{}", self.user, hashstring)
+    }
+
+    /// Give this a hash string (not a shadowfile entry!!!)
+    fn populate_hash(&mut self, hash: &str) -> Result<()> {
+        let encoded = match hash {
+            "" => false,
+            "!" => false,
+            _ => true,
+        };
+        self.hash = Some((hash.to_string(), encoded));
+        Ok(())
+    }
+}
+
+impl<A> Name for User<A> {
+    fn name(&self) -> &str {
+        &self.user
+    }
+}
+
+impl<A> Id for User<A> {
+    fn id(&self) -> usize {
+        self.uid
+    }
+}
+
+impl<A> Debug for User<A> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f,
+            "User {{\n\tuser: {:?}\n\tuid: {:?}\n\tgid: {:?}\n\tname: {:?}
+            home: {:?}\n\tshell: {:?}\n\tauth_delay: {:?}\n}}",
+            self.user, self.uid, self.gid, self.name, self.home, self.shell, self.auth_delay
+        )
+    }
+}
+
+impl<A> Display for User<A> {
+    /// Format this user as an entry in `/etc/passwd`. This
+    /// is an implementation detail, do NOT rely on this trait
+    /// being implemented in future.
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        #[cfg_attr(rustfmt, rustfmt_skip)]
+        write!(f, "{};{};{};{};{};{}",
+            self.user, self.uid, self.gid, self.name, self.home, self.shell
+        )
     }
 }
 
@@ -587,7 +585,6 @@ pub fn get_gid() -> Result<usize> {
 /// of an `AllUsers` or `AllGroups` if it is required.
 #[derive(Clone)]
 pub struct Config {
-    auth_enabled: bool,
     scheme: String,
     auth_delay: Duration,
     min_id: usize,
@@ -595,21 +592,6 @@ pub struct Config {
 }
 
 impl Config {
-    /// An alternative to the default constructor, this indicates that
-    /// authentication should be enabled.
-    pub fn with_auth() -> Config {
-        Config {
-            auth_enabled: true,
-            ..Default::default()
-        }
-    }
-
-    /// Builder pattern version of `Self::with_auth`.
-    pub fn auth(mut self, auth: bool) -> Config {
-        self.auth_enabled = auth;
-        self
-    }
-
     /// Set the delay for a failed authentication. Default is 3 seconds.
     pub fn auth_delay(mut self, delay: Duration) -> Config {
         self.auth_delay = delay;
@@ -655,7 +637,6 @@ impl Default for Config {
     /// Authentication is not enabled; The default base scheme is `file`.
     fn default() -> Config {
         Config {
-            auth_enabled: false,
             scheme: String::from(DEFAULT_SCHEME),
             auth_delay: Duration::new(DEFAULT_TIMEOUT, 0),
             min_id: MIN_ID,
@@ -717,7 +698,7 @@ pub trait All: AllInner {
     ///
     /// ```no_run
     /// # use redox_users::{All, AllUsers, Config};
-    /// let users = AllUsers::new(Config::default()).unwrap();
+    /// let users = AllUsers::basic(Config::default()).unwrap();
     /// let user = users.get_by_name("root").unwrap();
     /// ```
     fn get_by_name(&self, name: impl AsRef<str>) -> Option<&<Self as AllInner>::Gruser> {
@@ -740,7 +721,7 @@ pub trait All: AllInner {
     ///
     /// ```no_run
     /// # use redox_users::{All, AllUsers, Config};
-    /// let users = AllUsers::new(Config::default()).unwrap();
+    /// let users = AllUsers::basic(Config::default()).unwrap();
     /// let user = users.get_by_id(0).unwrap();
     /// ```
     fn get_by_id(&self, id: usize) -> Option<&<Self as AllInner>::Gruser> {
@@ -761,7 +742,7 @@ pub trait All: AllInner {
     ///
     /// ```no_run
     /// # use redox_users::{All, AllUsers, Config};
-    /// let users = AllUsers::new(Config::default()).unwrap();
+    /// let users = AllUsers::basic(Config::default()).unwrap();
     /// let uid = users.get_unique_id().expect("no available uid");
     /// ```
     fn get_unique_id(&self) -> Option<usize> {
@@ -817,53 +798,67 @@ pub trait All: AllInner {
 /// info from `/et/shadow`. If a caller attempts to perform an action that
 /// requires this info with an `AllUsers` config that does not have auth enabled,
 /// the `User` handling action will panic.
-pub struct AllUsers {
-    users: Vec<User>,
+pub struct AllUsers<A> {
+    users: Vec<User<A>>,
     config: Config,
 }
 
-impl AllUsers {
-    /// See [Shadowfile Handling](struct.AllUsers.html#shadowfile-handling) for
-    /// configuration information regarding this constructor.
+impl<A> AllUsers<A> {
     //TODO: Indicate if parsing an individual line failed or not
-    pub fn new(config: Config) -> Result<AllUsers> {
+    fn new_basic(config: Config) -> Result<AllUsers<A>> {
         let passwd_cntnt = read_locked_file(config.in_scheme(PASSWD_FILE))?;
 
-        let mut passwd_entries: Vec<User> = Vec::new();
+        let mut passwd_entries = Vec::new();
         for line in passwd_cntnt.lines() {
-            if let Ok(mut user) = User::from_str(line) {
+            if let Ok(mut user) = User::from_passwd_entry(line) {
                 user.auth_delay = config.auth_delay;
                 passwd_entries.push(user);
             }
         }
-
-        if config.auth_enabled {
-            let shadow_cntnt = read_locked_file(config.in_scheme(SHADOW_FILE))?;
-            let shadow_entries: Vec<&str> = shadow_cntnt.lines().collect();
-            for entry in shadow_entries.iter() {
-                let mut entry = entry.split(';');
-                let name = entry.next().ok_or(parse_error(
-                    "error parsing shadowfile: expected username"
-                ))?;
-                let hash = entry.next().ok_or(parse_error(
-                    "error parsing shadowfile: expected hash"
-                ))?;
-                passwd_entries
-                    .iter_mut()
-                    .find(|user| user.user == name)
-                    .ok_or(parse_error(
-                        "error parsing shadowfile: unkown user"
-                    ))?
-                    .populate_hash(hash)?;
-            }
-        }
-
-        Ok(AllUsers {
+        
+        Ok(AllUsers::<A> {
             users: passwd_entries,
-            config
+            config,
         })
     }
+}
 
+impl AllUsers<auth::Basic> {
+    pub fn basic(config: Config) -> Result<AllUsers<auth::Basic>> {
+        Self::new_basic(config)
+    }
+}
+
+#[cfg(feature = "auth")]
+impl AllUsers<auth::Full> {
+    /// See [Shadowfile Handling](struct.AllUsers.html#shadowfile-handling) for
+    /// configuration information regarding this constructor.
+    pub fn authenticator(config: Config) -> Result<AllUsers<auth::Full>> {
+        let shadow_cntnt = read_locked_file(config.in_scheme(SHADOW_FILE))?;
+        let shadow_entries: Vec<&str> = shadow_cntnt.lines().collect();
+        
+        let mut new = Self::new_basic(config)?;
+        
+        for entry in shadow_entries.iter() {
+            let mut entry = entry.split(';');
+            let name = entry.next().ok_or(parse_error(
+                "error parsing shadowfile: expected username"
+            ))?;
+            let hash = entry.next().ok_or(parse_error(
+                "error parsing shadowfile: expected hash"
+            ))?;
+            new.users
+                .iter_mut()
+                .find(|user| user.user == name)
+                .ok_or(parse_error(
+                    "error parsing shadowfile: unkown user"
+                ))?
+                .populate_hash(hash)?;
+        }
+        
+        Ok(new)
+    }
+    
     /// Adds a user with the specified attributes to the `AllUsers`
     /// instance. Note that the user's password is set unset (see
     /// [Unset vs Blank Passwords](struct.User.html#unset-vs-blank-passwords))
@@ -894,18 +889,15 @@ impl AllUsers {
             return Err(From::from(UsersError::AlreadyExists))
         }
 
-        if !self.config.auth_enabled {
-            panic!("Attempt to create user without access to the shadowfile");
-        }
-
         self.users.push(User {
             user: login.into(),
-            hash: Some(("!".into(), false)),
             uid,
             gid,
             name: name.into(),
             home: home.into(),
             shell: shell.into(),
+            hash: Some(("!".into(), false)),
+            auth: PhantomData,
             auth_delay: self.config.auth_delay
         });
         Ok(())
@@ -918,21 +910,17 @@ impl AllUsers {
         let mut shadowstring = String::new();
         for user in &self.users {
             userstring.push_str(&format!("{}\n", user.to_string().as_str()));
-            if self.config.auth_enabled {
-                shadowstring.push_str(&format!("{}\n", user.shadowstring()));
-            }
+            shadowstring.push_str(&format!("{}\n", user.shadow_entry()));
         }
 
         write_locked_file(self.config.in_scheme(PASSWD_FILE), userstring)?;
-        if self.config.auth_enabled {
-            write_locked_file(self.config.in_scheme(SHADOW_FILE), shadowstring)?;
-        }
+        write_locked_file(self.config.in_scheme(SHADOW_FILE), shadowstring)?;
         Ok(())
     }
 }
 
-impl AllInner for AllUsers {
-    type Gruser = User;
+impl<A> AllInner for AllUsers<A> {
+    type Gruser = User<A>;
 
     fn list(&self) -> &Vec<Self::Gruser> {
         &self.users
@@ -947,9 +935,9 @@ impl AllInner for AllUsers {
     }
 }
 
-impl All for AllUsers {}
+impl<A> All for AllUsers<A> {}
 
-impl Debug for AllUsers {
+impl<A> Debug for AllUsers<A> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "AllUsers {{\nusers: {:?}\n}}", self.users)
     }
@@ -1067,57 +1055,11 @@ mod test {
             .scheme(TEST_PREFIX.to_string())
     }
 
-    fn test_auth_cfg() -> Config {
-        test_cfg().auth(true)
-    }
-
     // *** struct.User ***
     #[cfg(feature = "auth")]
     #[test]
-    #[should_panic(expected = "Hash not populated!")]
-    fn wrong_attempt_set_password() {
-        let mut users = AllUsers::new(test_cfg()).unwrap();
-        let user = users.get_mut_by_id(1000).unwrap();
-        user.set_passwd("").unwrap();
-    }
-
-    #[test]
-    #[should_panic(expected = "Hash not populated!")]
-    fn wrong_attempt_unset_password() {
-        let mut users = AllUsers::new(test_cfg()).unwrap();
-        let user = users.get_mut_by_id(1000).unwrap();
-        user.unset_passwd();
-    }
-
-    #[cfg(feature = "auth")]
-    #[test]
-    #[should_panic(expected = "Hash not populated!")]
-    fn wrong_attempt_verify_password() {
-        let mut users = AllUsers::new(test_cfg()).unwrap();
-        let user = users.get_mut_by_id(1000).unwrap();
-        user.verify_passwd("hi folks");
-    }
-
-    #[test]
-    #[should_panic(expected = "Hash not populated!")]
-    fn wrong_attempt_is_password_blank() {
-        let mut users = AllUsers::new(test_cfg()).unwrap();
-        let user = users.get_mut_by_id(1000).unwrap();
-        user.is_passwd_blank();
-    }
-
-    #[test]
-    #[should_panic(expected = "Hash not populated!")]
-    fn wrong_attempt_is_password_unset() {
-        let mut users = AllUsers::new(test_cfg()).unwrap();
-        let user = users.get_mut_by_id(1000).unwrap();
-        user.is_passwd_unset();
-    }
-
-    #[cfg(feature = "auth")]
-    #[test]
     fn attempt_user_api() {
-        let mut users = AllUsers::new(test_auth_cfg()).unwrap();
+        let mut users = AllUsers::authenticator(test_cfg()).unwrap();
         let user = users.get_mut_by_id(1000).unwrap();
 
         assert_eq!(user.is_passwd_blank(), true);
@@ -1152,7 +1094,7 @@ mod test {
     // *** struct.AllUsers ***
     #[test]
     fn get_user() {
-        let users = AllUsers::new(test_auth_cfg()).unwrap();
+        let users = AllUsers::authenticator(test_cfg()).unwrap();
 
         let root = users.get_by_id(0).expect("'root' user missing");
         assert_eq!(root.user, "root".to_string());
@@ -1203,7 +1145,7 @@ mod test {
     #[cfg(feature = "auth")]
     #[test]
     fn manip_user() {
-        let mut users = AllUsers::new(test_auth_cfg()).unwrap();
+        let mut users = AllUsers::authenticator(test_cfg()).unwrap();
         // NOT testing `get_unique_id`
         let id = 7099;
         users
@@ -1335,7 +1277,7 @@ mod test {
     // *** Misc ***
     #[test]
     fn users_get_unused_ids() {
-        let users = AllUsers::new(test_cfg()).unwrap();
+        let users = AllUsers::basic(test_cfg()).unwrap();
         let id = users.get_unique_id().unwrap();
         if id < users.config.min_id || id > users.config.max_id {
             panic!("User ID is not between allowed margins")
