@@ -43,7 +43,6 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::slice::{Iter, IterMut};
-use std::str::FromStr;
 #[cfg(not(test))]
 #[cfg(feature = "auth")]
 use std::thread;
@@ -165,8 +164,10 @@ fn write_locked_file(file: impl AsRef<Path>, data: String) -> Result<()> {
 }
 
 pub mod auth {
+    #[derive(Debug)]
     pub struct Basic {}
     #[cfg(feature = "auth")]
+    #[derive(Debug)]
     pub struct Full {}
 }
 
@@ -199,13 +200,13 @@ pub struct User<A> {
     /// Shell path
     pub shell: String,
     
-    // Hashed password and Argon2 indicator, stored to simplify API
+    // Stored password hash text and an indicator to determine if the text is a
+    // hash.
     #[cfg(feature = "auth")]
     hash: Option<(String, bool)>,
-    // Marker
-    auth: PhantomData<A>,
     // Failed login delay duration
-    auth_delay: Duration
+    auth_delay: Duration,
+    auth: PhantomData<A>,
 }
 
 impl<A> User<A> {
@@ -406,11 +407,15 @@ impl<A> Id for User<A> {
 
 impl<A> Debug for User<A> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f,
-            "User {{\n\tuser: {:?}\n\tuid: {:?}\n\tgid: {:?}\n\tname: {:?}
-            home: {:?}\n\tshell: {:?}\n\tauth_delay: {:?}\n}}",
-            self.user, self.uid, self.gid, self.name, self.home, self.shell, self.auth_delay
-        )
+        f.debug_struct("User")
+            .field("user", &self.user)
+            .field("uid", &self.uid)
+            .field("gid", &self.gid)
+            .field("name", &self.name)
+            .field("home", &self.home)
+            .field("shell", &self.shell)
+            .field("auth_delay", &self.auth_delay)
+            .finish()
     }
 }
 
@@ -438,6 +443,37 @@ pub struct Group {
     pub users: Vec<String>,
 }
 
+impl Group {
+    /// Parse an entry from `/etc/group`.
+    fn from_group_entry(s: &str) -> Result<Self> {
+        let mut parts = s.trim()
+            .split(';');
+
+        let group = parts
+            .next()
+            .ok_or(parse_error("expected group"))?;
+        let gid = parts
+            .next()
+            .ok_or(parse_error("expected gid"))?
+            .parse::<usize>()?;
+        let users_str = parts.next()
+            .unwrap_or("");
+        let users = users_str.split(',')
+            .filter_map(|u| if u == "" {
+                None
+            } else {
+                Some(u.into())
+            })
+            .collect();
+
+        Ok(Group {
+            group: group.into(),
+            gid,
+            users,
+        })
+    }
+}
+
 impl Name for Group {
     fn name(&self) -> &str {
         &self.group
@@ -461,34 +497,6 @@ impl Display for Group {
             self.gid,
             self.users.join(",").trim_matches(',')
         )
-    }
-}
-
-impl FromStr for Group {
-    type Err = Box<dyn Error + Send + Sync>;
-
-    /// Parse an entry from `/etc/group`. This
-    /// is an implementation detail, do NOT rely on this trait
-    /// being implemented in future.
-    fn from_str(s: &str) -> Result<Self> {
-        let mut parts = s.split(';');
-
-        let group = parts
-            .next()
-            .ok_or(parse_error("expected group"))?;
-        let gid = parts
-            .next()
-            .ok_or(parse_error("expected gid"))?
-            .parse::<usize>()?;
-        //Allow for an empty users field. If there is a better way to do this, do it
-        let users_str = parts.next().unwrap_or(" ");
-        let users = users_str.split(',').map(|u| u.into()).collect();
-
-        Ok(Group {
-            group: group.into(),
-            gid,
-            users,
-        })
     }
 }
 
@@ -583,7 +591,7 @@ pub fn get_gid() -> Result<usize> {
 /// In most situations, `Config::default()` will work just fine.
 /// The other methods on this struct are usually for finer control
 /// of an `AllUsers` or `AllGroups` if it is required.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Config {
     scheme: String,
     auth_delay: Duration,
@@ -798,6 +806,7 @@ pub trait All: AllInner {
 /// info from `/et/shadow`. If a caller attempts to perform an action that
 /// requires this info with an `AllUsers` config that does not have auth enabled,
 /// the `User` handling action will panic.
+#[derive(Debug)]
 pub struct AllUsers<A> {
     users: Vec<User<A>>,
     config: Config,
@@ -937,12 +946,6 @@ impl<A> AllInner for AllUsers<A> {
 
 impl<A> All for AllUsers<A> {}
 
-impl<A> Debug for AllUsers<A> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "AllUsers {{\nusers: {:?}\n}}", self.users)
-    }
-}
-
 /// [`AllGroups`](struct.AllGroups.html) provides
 /// (borrowed) access to all groups on the system. Note that this
 /// struct implements [`All`](trait.All.html), for a bunch of convenience
@@ -950,6 +953,7 @@ impl<A> Debug for AllUsers<A> {
 ///
 /// General notes that also apply to this struct may be found with
 /// [`AllUsers`](struct.AllUsers.html).
+#[derive(Debug)]
 pub struct AllGroups {
     groups: Vec<Group>,
     config: Config,
@@ -963,7 +967,7 @@ impl AllGroups {
 
         let mut entries: Vec<Group> = Vec::new();
         for line in group_cntnt.lines() {
-            if let Ok(group) = Group::from_str(line) {
+            if let Ok(group) = Group::from_group_entry(line) {
                 entries.push(group);
             }
         }
@@ -1209,6 +1213,21 @@ mod test {
         );
     }
 
+    /* struct.Group */
+    #[test]
+    fn empty_groups() {
+        let group_trailing = Group::from_group_entry("nobody;2066; ").unwrap();
+        assert_eq!(group_trailing.users.len(), 0);
+        
+        let group_no_trailing = Group::from_group_entry("nobody;2066;").unwrap();
+        assert_eq!(group_no_trailing.users.len(), 0);
+        
+        assert_eq!(group_trailing.group, group_no_trailing.group);
+        assert_eq!(group_trailing.gid, group_no_trailing.gid);
+        assert_eq!(group_trailing.users, group_no_trailing.users);
+    }
+
+    /* struct.AllGroups */
     #[test]
     fn get_group() {
         let groups = AllGroups::new(test_cfg()).unwrap();
@@ -1262,6 +1281,43 @@ mod test {
 
         groups.remove_by_id(id);
         groups.save().unwrap();
+        let file_content = read_locked_file(test_prefix(GROUP_FILE)).unwrap();
+        assert_eq!(
+            file_content,
+            concat!(
+                "root;0;root\n",
+                "user;1000;user\n",
+                "wheel;1;user,root\n",
+                "li;1007;li\n"
+            )
+        );
+    }
+    
+    #[test]
+    fn empty_group() {
+        let mut groups = AllGroups::new(test_cfg()).unwrap();
+        
+        groups.add_group("nobody", 2260, &[]).unwrap();
+        eprintln!("{:#?}", groups);
+        groups.save().unwrap();
+        let file_content = read_locked_file(test_prefix(GROUP_FILE)).unwrap();
+        assert_eq!(
+            file_content,
+            concat!(
+                "root;0;root\n",
+                "user;1000;user\n",
+                "wheel;1;user,root\n",
+                "li;1007;li\n",
+                "nobody;2260;\n",
+            )
+        );
+        
+        drop(groups);
+        let mut groups = AllGroups::new(test_cfg()).unwrap();
+        
+        groups.remove_by_name("nobody");
+        groups.save().unwrap();
+        
         let file_content = read_locked_file(test_prefix(GROUP_FILE)).unwrap();
         assert_eq!(
             file_content,
