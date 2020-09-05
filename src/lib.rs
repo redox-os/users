@@ -1,6 +1,7 @@
 //! `redox-users` is designed to be a small, low-ish level interface
 //! to system user and group information, as well as user password
-//! authentication.
+//! authentication. It is OS-specific and will break horribly on platforms
+//! that are not [Redox-OS](https://redox-os.org).
 //!
 //! # Permissions
 //! Because this is a system level tool dealing with password
@@ -163,9 +164,15 @@ fn write_locked_file(file: impl AsRef<Path>, data: String) -> Result<()> {
     Ok(())
 }
 
+/// Marker types for [`User`] and [`AllUsers`].
 pub mod auth {
+    /// Marker type indicating that a `User` only has access to world-readable
+    /// user information, and cannot authenticate.
     #[derive(Debug)]
     pub struct Basic {}
+    
+    /// Marker type indicating that a `User` has access to all user
+    /// information, including password hashes.
     #[cfg(feature = "auth")]
     #[derive(Debug)]
     pub struct Full {}
@@ -173,6 +180,8 @@ pub mod auth {
 
 /// A struct representing a Redox user.
 /// Currently maps to an entry in the `/etc/passwd` file.
+///
+/// `A` should be a type from [`auth`].
 ///
 /// # Unset vs. Blank Passwords
 /// A note on unset passwords vs. blank passwords. A blank password
@@ -185,7 +194,8 @@ pub mod auth {
 /// hash always returns `false` upon attempted verification. The
 /// most commonly used hash for an unset password is `"!"`, but
 /// this crate makes no distinction. The most common way to unset
-/// the password is to use [`unset_passwd`](struct.User.html#method.unset_passwd).
+/// the password is to use
+/// [`unset_passwd`](struct.User.html#method.unset_passwd).
 pub struct User<A> {
     /// Username (login name)
     pub user: String,
@@ -193,7 +203,7 @@ pub struct User<A> {
     pub uid: usize,
     /// Group id
     pub gid: usize,
-    /// Real name (GECOS field)
+    /// Real name (human readable, can contain spaces)
     pub name: String,
     /// Home directory path
     pub home: String,
@@ -216,11 +226,12 @@ impl<A> User<A> {
 
     /// Provide a login command for the user, which is any
     /// entry point for starting a user's session, whether
-    /// a shell (use [`shell_cmd`](struct.User.html#method.shell_cmd) instead) or a graphical init.
+    /// a shell (use [`shell_cmd`](struct.User.html#method.shell_cmd) instead)
+    /// or a graphical init.
     ///
-    /// The `Command` will use the user's `uid` and `gid`, its `current_dir` will be
-    /// set to the user's home directory, and the follwing enviroment variables will
-    /// be populated:
+    /// The `Command` will use the user's `uid` and `gid`, its `current_dir`
+    /// will be set to the user's home directory, and the follwing enviroment
+    /// variables will be populated:
     ///
     ///    - `USER` set to the user's `user` field.
     ///    - `UID` set to the user's `uid` field.
@@ -282,16 +293,13 @@ impl<A> User<A> {
     }
 }
 
+/// Additional methods for if this `User` is authenticatable.
 #[cfg(feature = "auth")]
 impl User<auth::Full> {
-    /// Set the password for a user. Make sure the password you have
-    /// received is actually what the user wants as their password (this doesn't).
+    /// Set the password for a user. Make sure that `password`
+    /// is actually what the user wants as their password (this doesn't).
     ///
-    /// To set the password blank, use `""` as the password parameter.
-    ///
-    /// # Panics
-    /// If the User's hash fields are unpopulated, this function will `panic!`
-    /// (see [`AllUsers`](struct.AllUsers.html#shadowfile-handling) for more info).
+    /// To set the password blank, pass `""` as `password`.
     pub fn set_passwd(&mut self, password: impl AsRef<str>) -> Result<()> {
         let password = password.as_ref();
 
@@ -313,16 +321,12 @@ impl User<auth::Full> {
     }
 
     /// Unset the password (do not allow logins).
-    ///
-    /// # Panics
-    /// If the User's hash fields are unpopulated, this function will `panic!`
-    /// (see [`AllUsers`](struct.AllUsers.html#shadowfile-handling) for more info).
     pub fn unset_passwd(&mut self) {
         self.hash = Some(("!".into(), false));
     }
 
     /// Verify the password. If the hash is empty, this only
-    /// returns `true` if the password field is also empty.
+    /// returns `true` if `password` is also empty.
     /// Note that this is a blocking operation if the password
     /// is incorrect. See [`Config::auth_delay`](struct.Config.html#method.auth_delay)
     /// to set the wait time. Default is 3 seconds.
@@ -439,12 +443,11 @@ pub struct Group {
     pub group: String,
     /// Unique group id
     pub gid: usize,
-    /// Group members usernames
+    /// Group members' usernames
     pub users: Vec<String>,
 }
 
 impl Group {
-    /// Parse an entry from `/etc/group`.
     fn from_group_entry(s: &str) -> Result<Self> {
         let mut parts = s.trim()
             .split(';');
@@ -580,17 +583,13 @@ pub fn get_gid() -> Result<usize> {
     }
 }
 
-/// A generic configuration that allows better control of
-/// `AllUsers` or `AllGroups` than might otherwise be possible.
+/// A generic configuration that allows fine control of an [`AllUsers`] or
+/// [`AllGroups`].
 ///
-/// The use of the fields of this struct is completely optional
-/// depending on what constructor it is passed to. For example,
-/// `AllGroups` doesn't care if auth is enabled or not, or what
-/// the duration is.
+/// `auth_delay` is not used by [`AllGroups`]
 ///
 /// In most situations, `Config::default()` will work just fine.
-/// The other methods on this struct are usually for finer control
-/// of an `AllUsers` or `AllGroups` if it is required.
+/// The other fields are for finer control if it is required.
 #[derive(Clone, Debug)]
 pub struct Config {
     scheme: String,
@@ -642,7 +641,11 @@ impl Config {
 }
 
 impl Default for Config {
-    /// Authentication is not enabled; The default base scheme is `file`.
+    /// The default base scheme is `file:`.
+    ///
+    /// The default auth delay is 3 seconds.
+    ///
+    /// The default min and max ids are 1000 and 6000.
     fn default() -> Config {
         Config {
             scheme: String::from(DEFAULT_SCHEME),
@@ -780,32 +783,20 @@ pub trait All: AllInner {
     }
 }
 
-/// [`AllUsers`](struct.AllUsers.html) provides
-/// (borrowed) access to all the users on the system.
-/// Note that this struct implements [`All`](trait.All.html) for
-/// a bunch of convenient access functions.
+/// `AllUsers` provides (borrowed) access to all the users on the system.
+/// Note that this struct implements [`All`] for all of its access functions.
 ///
 /// # Notes
-/// Note that everything in this section also applies to
-/// [`AllGroups`](struct.AllGroups.html)
+/// Note that everything in this section also applies to [`AllGroups`].
 ///
-/// * If you mutate anything owned by an `AllUsers`,
-///   you must call the [`save`](struct.AllUsers.html#method.save)
-///   method in order for those changes to be applied to the system.
-/// * The API here is kept small on purpose in order to reduce the
-///   surface area for security exploitation. Most mutating actions
-///   can be accomplished via the [`get_mut_by_id`](struct.AllUsers.html#method.get_mut_by_id)
+/// * If you mutate anything owned by an `AllUsers`, you must call the
+///   [`save`](struct.AllUsers.html#method.save) method in order for those
+///   changes to be applied to the system.
+/// * The API here is kept small on purpose in order to reduce the surface area
+///   for security exploitation. Most mutating actions can be accomplished via
+///   the [`get_mut_by_id`](struct.AllUsers.html#method.get_mut_by_id)
 ///   and [`get_mut_by_name`](struct.AllUsers.html#method.get_mut_by_name)
 ///   functions.
-///
-/// # Shadowfile handling
-/// This implementation of redox-users uses a shadowfile implemented primarily
-/// by this struct. `AllUsers` respects the `auth_enabled` status of the `Config`
-/// that is was passed. If auth is enabled, it populates the
-/// hash fields of each user struct that it parses from `/etc/passwd` with
-/// info from `/et/shadow`. If a caller attempts to perform an action that
-/// requires this info with an `AllUsers` config that does not have auth enabled,
-/// the `User` handling action will panic.
 #[derive(Debug)]
 pub struct AllUsers<A> {
     users: Vec<User<A>>,
@@ -814,7 +805,7 @@ pub struct AllUsers<A> {
 
 impl<A> AllUsers<A> {
     //TODO: Indicate if parsing an individual line failed or not
-    fn new_basic(config: Config) -> Result<AllUsers<A>> {
+    fn new(config: Config) -> Result<AllUsers<A>> {
         let passwd_cntnt = read_locked_file(config.in_scheme(PASSWD_FILE))?;
 
         let mut passwd_entries = Vec::new();
@@ -833,20 +824,22 @@ impl<A> AllUsers<A> {
 }
 
 impl AllUsers<auth::Basic> {
+    /// Provide access to all user information on the system except
+    /// authentication. This is adequate for almost all uses of `AllUsers`.
     pub fn basic(config: Config) -> Result<AllUsers<auth::Basic>> {
-        Self::new_basic(config)
+        Self::new(config)
     }
 }
 
 #[cfg(feature = "auth")]
 impl AllUsers<auth::Full> {
-    /// See [Shadowfile Handling](struct.AllUsers.html#shadowfile-handling) for
-    /// configuration information regarding this constructor.
+    /// If access to password related methods for the [`User`]s yielded by this
+    /// `AllUsers` is required, use this constructor.
     pub fn authenticator(config: Config) -> Result<AllUsers<auth::Full>> {
         let shadow_cntnt = read_locked_file(config.in_scheme(SHADOW_FILE))?;
         let shadow_entries: Vec<&str> = shadow_cntnt.lines().collect();
         
-        let mut new = Self::new_basic(config)?;
+        let mut new = Self::new(config)?;
         
         for entry in shadow_entries.iter() {
             let mut entry = entry.split(';');
@@ -873,15 +866,8 @@ impl AllUsers<auth::Full> {
     /// [Unset vs Blank Passwords](struct.User.html#unset-vs-blank-passwords))
     /// during this call.
     ///
-    /// This function is classified as a mutating operation,
-    /// and users must therefore call [`save`](struct.AllUsers.html#method.save)
+    /// Make sure to call [`save`](struct.AllUsers.html#method.save)
     /// in order for the new user to be applied to the system.
-    ///
-    /// # Panics
-    /// This function will `panic!` if the [`Config`](struct.Config.html)
-    /// passed to [`AllUsers::new`](struct.AllUsers.html#method.new)
-    /// does not have authentication enabled (see
-    /// [`Shadowfile handling`](struct.AllUsers.html#shadowfile-handling)).
     //TODO: Take uid/gid as Option<usize> and if none, find an unused ID.
     pub fn add_user(
         &mut self,
@@ -946,13 +932,11 @@ impl<A> AllInner for AllUsers<A> {
 
 impl<A> All for AllUsers<A> {}
 
-/// [`AllGroups`](struct.AllGroups.html) provides
-/// (borrowed) access to all groups on the system. Note that this
-/// struct implements [`All`](trait.All.html), for a bunch of convenience
-/// functions.
+/// `AllGroups` provides (borrowed) access to all groups on the system. Note
+/// that this struct implements [`All`] for all of its access functions.
 ///
 /// General notes that also apply to this struct may be found with
-/// [`AllUsers`](struct.AllUsers.html).
+/// [`AllUsers`].
 #[derive(Debug)]
 pub struct AllGroups {
     groups: Vec<Group>,
@@ -980,8 +964,7 @@ impl AllGroups {
 
     /// Adds a group with the specified attributes to this `AllGroups`.
     ///
-    /// This function is classified as a mutating operation,
-    /// and users must therefore call [`save`](struct.AllGroups.html#method.save)
+    /// Make sure to call [`save`](struct.AllGroups.html#method.save)
     /// in order for the new group to be applied to the system.
     //TODO: Take Option<usize> for gid and find unused ID if None
     pub fn add_group(
@@ -1153,7 +1136,7 @@ mod test {
         // NOT testing `get_unique_id`
         let id = 7099;
         users
-            .add_user("fb", id, id, "FooBar", "/home/foob", "/bin/zsh")
+            .add_user("fb", id, id, "Foo Bar", "/home/foob", "/bin/zsh")
             .expect("failed to add user 'fb'");
         //                                            weirdo ^^^^^^^^ :P
         users.save().unwrap();
@@ -1164,7 +1147,7 @@ mod test {
                 "root;0;0;root;file:/root;file:/bin/ion\n",
                 "user;1000;1000;user;file:/home/user;file:/bin/ion\n",
                 "li;1007;1007;Lorem;file:/home/lorem;file:/bin/ion\n",
-                "fb;7099;7099;FooBar;/home/foob;/bin/zsh\n"
+                "fb;7099;7099;Foo Bar;/home/foob;/bin/zsh\n"
             )
         );
         let s_file_content = read_locked_file(test_prefix(SHADOW_FILE)).unwrap();
@@ -1189,7 +1172,7 @@ mod test {
                 "root;0;0;root;file:/root;file:/bin/ion\n",
                 "user;1000;1000;user;file:/home/user;file:/bin/ion\n",
                 "li;1007;1007;Lorem;file:/home/lorem;file:/bin/ion\n",
-                "fb;7099;7099;FooBar;/home/foob;/bin/fish\n"
+                "fb;7099;7099;Foo Bar;/home/foob;/bin/fish\n"
             )
         );
         let s_file_content = read_locked_file(test_prefix(SHADOW_FILE)).unwrap();
