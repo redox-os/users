@@ -14,6 +14,9 @@ rust-argon2 = { version = "0.8", optional = true }
 getrandom = "0.1"
 redox_syscall = "0.1"
 
+[target.'cfg(not(target_os = "redox"))'.dependencies]
+nix = "0.18"
+
 [features]
 default = ["auth"]
 

@@ -30,16 +30,19 @@
 #[cfg(feature = "auth")]
 extern crate argon2;
 extern crate getrandom;
+extern crate nix;
 extern crate syscall;
 
 use std::convert::From;
 use std::error::Error;
 use std::fmt::{self, Debug, Display};
-use std::fs::OpenOptions;
+use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::marker::PhantomData;
 #[cfg(target_os = "redox")]
 use std::os::unix::fs::OpenOptionsExt;
+#[cfg(not(target_os = "redox"))]
+use std::os::unix::io::AsRawFd;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -48,6 +51,9 @@ use std::slice::{Iter, IterMut};
 #[cfg(feature = "auth")]
 use std::thread;
 use std::time::Duration;
+
+#[cfg(not(target_os = "redox"))]
+use nix::fcntl::{flock, FlockArg};
 
 #[cfg(target_os = "redox")]
 use syscall::flag::{O_EXLOCK, O_SHLOCK};
@@ -122,46 +128,55 @@ impl From<SyscallError> for UsersError {
     }
 }
 
-fn read_locked_file(file: impl AsRef<Path>) -> Result<String> {
-    #[cfg(test)]
-    println!("Reading file: {}", file.as_ref().display());
-
-    #[cfg(target_os = "redox")]
-    let mut file = OpenOptions::new()
-        .read(true)
-        .custom_flags(O_SHLOCK as i32)
-        .open(file)?;
-    #[cfg(not(target_os = "redox"))]
-    #[cfg_attr(rustfmt, rustfmt_skip)]
-    let mut file = OpenOptions::new()
-        .read(true)
-        .open(file)?;
-
-    let len = file.metadata()?.len();
-    let mut file_data = String::with_capacity(len as usize);
-    file.read_to_string(&mut file_data)?;
-    Ok(file_data)
+#[derive(Clone, Copy)]
+enum Lock {
+    Shared,
+    Exclusive,
 }
 
-fn write_locked_file(file: impl AsRef<Path>, data: String) -> Result<()> {
+impl Lock {
+    #[cfg(target_os = "redox")]
+    fn as_olock(self) -> i32 {
+        (match self {
+            Lock::Shared => O_SHLOCK,
+            Lock::Exclusive => O_EXLOCK,
+        }) as i32
+    }
+    
+    #[cfg(not(target_os = "redox"))]
+    fn as_flock(self) -> FlockArg {
+        match self {
+            Lock::Shared => FlockArg::LockShared,
+            Lock::Exclusive => FlockArg::LockExclusive,
+        }
+    }
+}
+
+/// Naive semi-cross platform file locking (need to support linux for tests).
+fn locked_file(file: impl AsRef<Path>, lock: Lock) -> Result<File> {
     #[cfg(test)]
-    println!("Writing file: {}", file.as_ref().display());
+    println!("Open file: {}", file.as_ref().display());
 
     #[cfg(target_os = "redox")]
-    let mut file = OpenOptions::new()
-        .write(true)
-        .truncate(true)
-        .custom_flags(O_EXLOCK as i32)
-        .open(file)?;
+    {
+        Ok(OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(lock.as_olock())
+            .open(file)?)
+    }
     #[cfg(not(target_os = "redox"))]
     #[cfg_attr(rustfmt, rustfmt_skip)]
-    let mut file = OpenOptions::new()
-        .write(true)
-        .truncate(true)
-        .open(file)?;
-
-    file.write(data.as_bytes())?;
-    Ok(())
+    {
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(file)?;
+        let fd = file.as_raw_fd();
+        eprintln!("Fd: {}", fd);
+        flock(fd, lock.as_flock())?;
+        Ok(file)
+    }
 }
 
 /// Marker types for [`User`] and [`AllUsers`].
@@ -801,12 +816,18 @@ pub trait All: AllInner {
 pub struct AllUsers<A> {
     users: Vec<User<A>>,
     config: Config,
+    
+    // Hold on to the locked fds to prevent race conditions
+    passwd_fd: File,
+    shadow_fd: Option<File>,
 }
 
 impl<A> AllUsers<A> {
     //TODO: Indicate if parsing an individual line failed or not
     fn new(config: Config) -> Result<AllUsers<A>> {
-        let passwd_cntnt = read_locked_file(config.in_scheme(PASSWD_FILE))?;
+        let mut passwd_fd = locked_file(config.in_scheme(PASSWD_FILE), Lock::Exclusive)?;
+        let mut passwd_cntnt = String::new();
+        passwd_fd.read_to_string(&mut passwd_cntnt)?;
 
         let mut passwd_entries = Vec::new();
         for line in passwd_cntnt.lines() {
@@ -819,6 +840,8 @@ impl<A> AllUsers<A> {
         Ok(AllUsers::<A> {
             users: passwd_entries,
             config,
+            passwd_fd,
+            shadow_fd: None,
         })
     }
 }
@@ -836,10 +859,13 @@ impl AllUsers<auth::Full> {
     /// If access to password related methods for the [`User`]s yielded by this
     /// `AllUsers` is required, use this constructor.
     pub fn authenticator(config: Config) -> Result<AllUsers<auth::Full>> {
-        let shadow_cntnt = read_locked_file(config.in_scheme(SHADOW_FILE))?;
+        let mut shadow_fd = locked_file(config.in_scheme(SHADOW_FILE), Lock::Exclusive)?;
+        let mut shadow_cntnt = String::new();
+        shadow_fd.read_to_string(&mut shadow_cntnt)?;
         let shadow_entries: Vec<&str> = shadow_cntnt.lines().collect();
         
         let mut new = Self::new(config)?;
+        new.shadow_fd = Some(shadow_fd);
         
         for entry in shadow_entries.iter() {
             let mut entry = entry.split(';');
@@ -900,7 +926,7 @@ impl AllUsers<auth::Full> {
 
     /// Syncs the data stored in the `AllUsers` instance to the filesystem.
     /// To apply changes to the system from an `AllUsers`, you MUST call this function!
-    pub fn save(&self) -> Result<()> {
+    pub fn save(&mut self) -> Result<()> {
         let mut userstring = String::new();
         let mut shadowstring = String::new();
         for user in &self.users {
@@ -908,8 +934,10 @@ impl AllUsers<auth::Full> {
             shadowstring.push_str(&format!("{}\n", user.shadow_entry()));
         }
 
-        write_locked_file(self.config.in_scheme(PASSWD_FILE), userstring)?;
-        write_locked_file(self.config.in_scheme(SHADOW_FILE), shadowstring)?;
+        self.passwd_fd.write_all(userstring.as_bytes())?;
+        self.shadow_fd.as_ref()
+            .expect("shadow_fd should exist for AllUsers<auth::Full>")
+            .write_all(shadowstring.as_bytes())?;
         Ok(())
     }
 }
@@ -941,13 +969,17 @@ impl<A> All for AllUsers<A> {}
 pub struct AllGroups {
     groups: Vec<Group>,
     config: Config,
+    
+    group_fd: File,
 }
 
 impl AllGroups {
     /// Create a new `AllGroups`.
     //TODO: Indicate if parsing an individual line failed or not
     pub fn new(config: Config) -> Result<AllGroups> {
-        let group_cntnt = read_locked_file(config.in_scheme(GROUP_FILE))?;
+        let mut group_fd = locked_file(config.in_scheme(GROUP_FILE), Lock::Exclusive)?;
+        let mut group_cntnt = String::new();
+        group_fd.read_to_string(&mut group_cntnt)?;
 
         let mut entries: Vec<Group> = Vec::new();
         for line in group_cntnt.lines() {
@@ -959,6 +991,7 @@ impl AllGroups {
         Ok(AllGroups {
             groups: entries,
             config,
+            group_fd,
         })
     }
 
@@ -995,13 +1028,14 @@ impl AllGroups {
 
     /// Syncs the data stored in this `AllGroups` instance to the filesystem.
     /// To apply changes from an `AllGroups`, you MUST call this function!
-    pub fn save(&self) -> Result<()> {
+    pub fn save(&mut self) -> Result<()> {
         let mut groupstring = String::new();
         for group in &self.groups {
             groupstring.push_str(&format!("{}\n", group.to_string().as_str()));
         }
 
-        write_locked_file(self.config.in_scheme(GROUP_FILE), groupstring)
+        self.group_fd.write_all(groupstring.as_bytes())?;
+        Ok(())
     }
 }
 
@@ -1023,6 +1057,12 @@ impl AllInner for AllGroups {
 
 impl All for AllGroups {}
 
+impl Drop for AllGroups {
+    fn drop(&mut self) {
+        flock(self.group_fd.as_raw_fd(), FlockArg::Unlock);
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -1040,6 +1080,19 @@ mod test {
         Config::default()
             // Since all this really does is prepend `sheme` to the consts
             .scheme(TEST_PREFIX.to_string())
+    }
+
+    fn read_locked_file(file: impl AsRef<Path>) -> Result<String> {
+        let mut fd = locked_file(file, Lock::Exclusive)?;
+        let mut cntnt = String::new();
+        fd.read_to_string(&mut cntnt)?;
+        Ok(cntnt)
+    }
+
+    fn write_locked_file(file: impl AsRef<Path>, cntnt: impl AsRef<[u8]>) -> Result<()> {
+        locked_file(file, Lock::Exclusive)?
+            .write_all(cntnt.as_ref())?;
+        Ok(())
     }
 
     // *** struct.User ***
@@ -1281,7 +1334,6 @@ mod test {
         let mut groups = AllGroups::new(test_cfg()).unwrap();
         
         groups.add_group("nobody", 2260, &[]).unwrap();
-        eprintln!("{:#?}", groups);
         groups.save().unwrap();
         let file_content = read_locked_file(test_prefix(GROUP_FILE)).unwrap();
         assert_eq!(
