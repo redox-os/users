@@ -29,7 +29,7 @@
 
 use std::convert::From;
 use std::error::Error;
-use std::fmt::{self, Debug, Display};
+use std::fmt::{self, Debug};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::marker::PhantomData;
@@ -76,7 +76,7 @@ pub type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
 #[derive(Debug, PartialEq)]
 pub enum UsersError {
     Os { reason: String },
-    Parsing { reason: String },
+    Parsing { reason: String, line: usize },
     NotFound,
     AlreadyExists
 }
@@ -85,8 +85,8 @@ impl fmt::Display for UsersError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             UsersError::Os { reason } => write!(f, "os error: code {}", reason),
-            UsersError::Parsing { reason } => {
-                write!(f, "parse error: {}", reason)
+            UsersError::Parsing { reason, line } => {
+                write!(f, "parse error line {}: {}", line, reason)
             },
             UsersError::NotFound => write!(f, "user/group not found"),
             UsersError::AlreadyExists => write!(f, "user/group already exists")
@@ -101,9 +101,10 @@ impl Error for UsersError {
 }
 
 #[inline]
-fn parse_error(reason: &str) -> UsersError {
+fn parse_error(line: usize, reason: &str) -> UsersError {
     UsersError::Parsing {
-        reason: reason.into()
+        reason: reason.into(),
+        line,
     }
 }
 
@@ -270,29 +271,29 @@ impl<A> User<A> {
         command
     }
     
-    fn from_passwd_entry(s: &str) -> Result<Self> {
+    fn from_passwd_entry(s: &str, line: usize) -> Result<Self> {
         let mut parts = s.split(';');
 
         let user = parts
             .next()
-            .ok_or(parse_error("expected user"))?;
+            .ok_or(parse_error(line, "expected user"))?;
         let uid = parts
             .next()
-            .ok_or(parse_error("expected uid"))?
+            .ok_or(parse_error(line, "expected uid"))?
             .parse::<usize>()?;
         let gid = parts
             .next()
-            .ok_or(parse_error("expected uid"))?
+            .ok_or(parse_error(line, "expected uid"))?
             .parse::<usize>()?;
         let name = parts
             .next()
-            .ok_or(parse_error("expected real name"))?;
+            .ok_or(parse_error(line, "expected real name"))?;
         let home = parts
             .next()
-            .ok_or(parse_error("expected home dir path"))?;
+            .ok_or(parse_error(line, "expected home dir path"))?;
         let shell = parts
             .next()
-            .ok_or(parse_error("expected shell path"))?;
+            .ok_or(parse_error(line, "expected shell path"))?;
 
         Ok(User::<A> {
             user: user.into(),
@@ -306,6 +307,14 @@ impl<A> User<A> {
             auth: PhantomData,
             auth_delay: Duration::default(),
         })
+    }
+
+    /// Format this user as an entry in `/etc/passwd`.
+    fn passwd_entry(&self) -> String {
+        #[cfg_attr(rustfmt, rustfmt_skip)]
+        format!("{};{};{};{};{};{}\n",
+            self.user, self.uid, self.gid, self.name, self.home, self.shell
+        )
     }
 }
 
@@ -385,7 +394,7 @@ impl User<auth::Full> {
             Some((ref hash, _)) => hash,
             None => panic!(USER_AUTH_FULL_EXPECTED_HASH)
         };
-        format!("{};{}", self.user, hashstring)
+        format!("{};{}\n", self.user, hashstring)
     }
 
     /// Give this a hash string (not a shadowfile entry!!!)
@@ -426,18 +435,6 @@ impl<A> Debug for User<A> {
     }
 }
 
-impl<A> Display for User<A> {
-    /// Format this user as an entry in `/etc/passwd`. This
-    /// is an implementation detail, do NOT rely on this trait
-    /// being implemented in future.
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        #[cfg_attr(rustfmt, rustfmt_skip)]
-        write!(f, "{};{};{};{};{};{}",
-            self.user, self.uid, self.gid, self.name, self.home, self.shell
-        )
-    }
-}
-
 /// A struct representing a Redox user group.
 /// Currently maps to an `/etc/group` file entry.
 #[derive(Debug)]
@@ -451,16 +448,16 @@ pub struct Group {
 }
 
 impl Group {
-    fn from_group_entry(s: &str) -> Result<Self> {
+    fn from_group_entry(s: &str, line: usize) -> Result<Self> {
         let mut parts = s.trim()
             .split(';');
 
         let group = parts
             .next()
-            .ok_or(parse_error("expected group"))?;
+            .ok_or(parse_error(line, "expected group"))?;
         let gid = parts
             .next()
-            .ok_or(parse_error("expected gid"))?
+            .ok_or(parse_error(line, "expected gid"))?
             .parse::<usize>()?;
         let users_str = parts.next()
             .unwrap_or("");
@@ -478,6 +475,18 @@ impl Group {
             users,
         })
     }
+
+    /// Format this group as an entry in `/etc/group`. This
+    /// is an implementation detail, do NOT rely on this trait
+    /// being implemented in future.
+    fn group_entry(&self) -> String {
+        #[cfg_attr(rustfmt, rustfmt_skip)]
+        format!("{};{};{}\n",
+            self.group,
+            self.gid,
+            self.users.join(",").trim_matches(',')
+        )
+    }
 }
 
 impl Name for Group {
@@ -489,20 +498,6 @@ impl Name for Group {
 impl Id for Group {
     fn id(&self) -> usize {
         self.gid
-    }
-}
-
-impl Display for Group {
-    /// Format this group as an entry in `/etc/group`. This
-    /// is an implementation detail, do NOT rely on this trait
-    /// being implemented in future.
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        #[cfg_attr(rustfmt, rustfmt_skip)]
-        write!(f, "{};{};{}",
-            self.group,
-            self.gid,
-            self.users.join(",").trim_matches(',')
-        )
     }
 }
 
@@ -777,20 +772,42 @@ pub trait All: AllInner {
         None
     }
 
-    /// Remove a [`User`] or [`Group`] from this `All` given it's name. This
-    /// won't provide an indication of whether the user was removed or not, but
-    /// is guaranteed to work if a user with the specified name exists.
-    fn remove_by_name(&mut self, name: impl AsRef<str>) {
-        // Significantly more elegant than other possible solutions.
-        //TODO: I wish it could indicate if it removed anything.
-        self.list_mut()
-            .retain(|gruser| gruser.name() != name.as_ref() );
+    /// Remove a [`User`] or [`Group`] from this `All` given it's name. If the
+    /// Gruser was removed return `true`, else return `false`. This ensures
+    /// that the Gruser no longer exists.
+    fn remove_by_name(&mut self, name: impl AsRef<str>) -> bool {
+        let list = self.list_mut();
+        let indx = list.iter()
+            .enumerate()
+            .find_map(|(indx, gruser)| if gruser.name() == name.as_ref() {
+                    Some(indx)
+                } else {
+                    None
+                });
+        if let Some(indx) = indx {
+            list.remove(indx);
+            true
+        } else {
+            false
+        }
     }
 
     /// Id version of [`All::remove_by_name`].
-    fn remove_by_id(&mut self, id: usize) {
-        self.list_mut()
-            .retain(|gruser| gruser.id() != id );
+    fn remove_by_id(&mut self, id: usize) -> bool {
+        let list = self.list_mut();
+        let indx = list.iter()
+            .enumerate()
+            .find_map(|(indx, gruser)| if gruser.id() == id {
+                    Some(indx)
+                } else {
+                    None
+                });
+        if let Some(indx) = indx {
+            list.remove(indx);
+            true
+        } else {
+            false
+        }
     }
 }
 
@@ -816,18 +833,16 @@ pub struct AllUsers<A> {
 }
 
 impl<A> AllUsers<A> {
-    //TODO: Indicate if parsing an individual line failed or not
     fn new(config: Config) -> Result<AllUsers<A>> {
         let mut passwd_fd = locked_file(config.in_scheme(PASSWD_FILE), Lock::Exclusive)?;
         let mut passwd_cntnt = String::new();
         passwd_fd.read_to_string(&mut passwd_cntnt)?;
 
         let mut passwd_entries = Vec::new();
-        for line in passwd_cntnt.lines() {
-            if let Ok(mut user) = User::from_passwd_entry(line) {
-                user.auth_delay = config.auth_delay;
-                passwd_entries.push(user);
-            }
+        for (indx, line) in passwd_cntnt.lines().enumerate() {
+            let mut user = User::from_passwd_entry(line, indx)?;
+            user.auth_delay = config.auth_delay;
+            passwd_entries.push(user);
         }
         
         Ok(AllUsers::<A> {
@@ -860,18 +875,18 @@ impl AllUsers<auth::Full> {
         let mut new = Self::new(config)?;
         new.shadow_fd = Some(shadow_fd);
         
-        for entry in shadow_entries.iter() {
+        for (indx, entry) in shadow_entries.iter().enumerate() {
             let mut entry = entry.split(';');
-            let name = entry.next().ok_or(parse_error(
+            let name = entry.next().ok_or(parse_error(indx,
                 "error parsing shadowfile: expected username"
             ))?;
-            let hash = entry.next().ok_or(parse_error(
+            let hash = entry.next().ok_or(parse_error(indx,
                 "error parsing shadowfile: expected hash"
             ))?;
             new.users
                 .iter_mut()
                 .find(|user| user.user == name)
-                .ok_or(parse_error(
+                .ok_or(parse_error(indx,
                     "error parsing shadowfile: unkown user"
                 ))?
                 .populate_hash(hash)?;
@@ -924,8 +939,8 @@ impl AllUsers<auth::Full> {
         let mut userstring = String::new();
         let mut shadowstring = String::new();
         for user in &self.users {
-            userstring.push_str(&format!("{}\n", user.to_string().as_str()));
-            shadowstring.push_str(&format!("{}\n", user.shadow_entry()));
+            userstring.push_str(&user.passwd_entry());
+            shadowstring.push_str(&user.shadow_entry());
         }
 
         let mut shadow_fd = self.shadow_fd.as_mut()
@@ -985,17 +1000,15 @@ pub struct AllGroups {
 
 impl AllGroups {
     /// Create a new `AllGroups`.
-    //TODO: Indicate if parsing an individual line failed or not
     pub fn new(config: Config) -> Result<AllGroups> {
         let mut group_fd = locked_file(config.in_scheme(GROUP_FILE), Lock::Exclusive)?;
         let mut group_cntnt = String::new();
         group_fd.read_to_string(&mut group_cntnt)?;
 
         let mut entries: Vec<Group> = Vec::new();
-        for line in group_cntnt.lines() {
-            if let Ok(group) = Group::from_group_entry(line) {
-                entries.push(group);
-            }
+        for (indx, line) in group_cntnt.lines().enumerate() {
+            let group = Group::from_group_entry(line, indx)?;
+            entries.push(group);
         }
 
         Ok(AllGroups {
@@ -1041,7 +1054,7 @@ impl AllGroups {
     pub fn save(&mut self) -> Result<()> {
         let mut groupstring = String::new();
         for group in &self.groups {
-            groupstring.push_str(&format!("{}\n", group.to_string().as_str()));
+            groupstring.push_str(&group.group_entry());
         }
 
         reset_file(&mut self.group_fd)?;
@@ -1266,10 +1279,10 @@ mod test {
     /* struct.Group */
     #[test]
     fn empty_groups() {
-        let group_trailing = Group::from_group_entry("nobody;2066; ").unwrap();
+        let group_trailing = Group::from_group_entry("nobody;2066; ", 0).unwrap();
         assert_eq!(group_trailing.users.len(), 0);
         
-        let group_no_trailing = Group::from_group_entry("nobody;2066;").unwrap();
+        let group_no_trailing = Group::from_group_entry("nobody;2066;", 0).unwrap();
         assert_eq!(group_no_trailing.users.len(), 0);
         
         assert_eq!(group_trailing.group, group_no_trailing.group);
