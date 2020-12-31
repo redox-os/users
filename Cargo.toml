@@ -8,11 +8,12 @@ repository = "https://gitlab.redox-os.org/redox-os/users"
 documentation = "https://docs.rs/redox_users"
 readme = "README.md"
 keywords = ["redox", "auth"]
+edition = "2018"
 
 [dependencies]
-rust-argon2 = { version = "0.8", optional = true }
 getrandom = "0.1"
 redox_syscall = "0.1"
+rust-argon2 = { version = "0.8", optional = true }
 
 [target.'cfg(not(target_os = "redox"))'.dependencies]
 nix = "0.18"

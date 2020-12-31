@@ -27,12 +27,6 @@
 //! schemes for redox in future without breakage of existing
 //! software.
 
-#[cfg(feature = "auth")]
-extern crate argon2;
-extern crate getrandom;
-extern crate nix;
-extern crate syscall;
-
 use std::convert::From;
 use std::error::Error;
 use std::fmt::{self, Debug, Display};
@@ -52,8 +46,8 @@ use std::slice::{Iter, IterMut};
 use std::thread;
 use std::time::Duration;
 
-#[cfg(not(target_os = "redox"))]
-use nix::fcntl::{flock, FlockArg};
+//#[cfg(not(target_os = "redox"))]
+//use nix::fcntl::{flock, FlockArg};
 
 #[cfg(target_os = "redox")]
 use syscall::flag::{O_EXLOCK, O_SHLOCK};
@@ -129,6 +123,7 @@ impl From<SyscallError> for UsersError {
 }
 
 #[derive(Clone, Copy)]
+#[allow(dead_code)]
 enum Lock {
     Shared,
     Exclusive,
@@ -143,17 +138,18 @@ impl Lock {
         }) as i32
     }
     
-    #[cfg(not(target_os = "redox"))]
+    /*#[cfg(not(target_os = "redox"))]
     fn as_flock(self) -> FlockArg {
         match self {
             Lock::Shared => FlockArg::LockShared,
             Lock::Exclusive => FlockArg::LockExclusive,
         }
-    }
+    }*/
 }
 
 /// Naive semi-cross platform file locking (need to support linux for tests).
-fn locked_file(file: impl AsRef<Path>, lock: Lock) -> Result<File> {
+#[allow(dead_code)]
+fn locked_file(file: impl AsRef<Path>, _lock: Lock) -> Result<File> {
     #[cfg(test)]
     println!("Open file: {}", file.as_ref().display());
 
@@ -162,7 +158,7 @@ fn locked_file(file: impl AsRef<Path>, lock: Lock) -> Result<File> {
         Ok(OpenOptions::new()
             .read(true)
             .write(true)
-            .custom_flags(lock.as_olock())
+            .custom_flags(_lock.as_olock())
             .open(file)?)
     }
     #[cfg(not(target_os = "redox"))]
@@ -174,7 +170,7 @@ fn locked_file(file: impl AsRef<Path>, lock: Lock) -> Result<File> {
             .open(file)?;
         let fd = file.as_raw_fd();
         eprintln!("Fd: {}", fd);
-        //flock(fd, lock.as_flock())?;
+        //flock(fd, _lock.as_flock())?;
         Ok(file)
     }
 }
@@ -678,7 +674,7 @@ impl Default for Config {
 // Nasty hack to prevent the compiler complaining about
 // "leaking" `AllInner`
 mod sealed {
-    use Config;
+    use crate::Config;
 
     pub trait Name {
         fn name(&self) -> &str;
