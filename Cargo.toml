@@ -1,6 +1,6 @@
 [package]
 name = "redox_users"
-version = "0.3.5"
+version = "0.4.0"
 authors = ["Jose Narvaez <goyox86@gmail.com>", "Wesley Hershberger <mggmugginsmc@gmail.com>"]
 description = "A Rust library to access Redox users and groups functionality"
 license = "MIT"
@@ -11,12 +11,12 @@ keywords = ["redox", "auth"]
 edition = "2018"
 
 [dependencies]
-getrandom = "0.1"
-redox_syscall = "0.1"
+getrandom = { version = "0.2", features = ["std"] }
+redox_syscall = "0.2"
 rust-argon2 = { version = "0.8", optional = true }
 
-[target.'cfg(not(target_os = "redox"))'.dependencies]
-nix = "0.18"
+#[target.'cfg(not(target_os = "redox"))'.dependencies]
+#nix = "0.19"
 
 [features]
 default = ["auth"]
