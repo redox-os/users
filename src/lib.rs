@@ -37,7 +37,7 @@ use std::convert::From;
 use std::error::Error;
 use std::fmt::{self, Debug, Display};
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::marker::PhantomData;
 #[cfg(target_os = "redox")]
 use std::os::unix::fs::OpenOptionsExt;
@@ -174,9 +174,16 @@ fn locked_file(file: impl AsRef<Path>, lock: Lock) -> Result<File> {
             .open(file)?;
         let fd = file.as_raw_fd();
         eprintln!("Fd: {}", fd);
-        flock(fd, lock.as_flock())?;
+        //flock(fd, lock.as_flock())?;
         Ok(file)
     }
+}
+
+/// Reset a file for rewriting (user/group dbs must be erased before write-out)
+fn reset_file(fd: &mut File) -> Result<()> {
+    fd.set_len(0)?;
+    fd.seek(SeekFrom::Start(0))?;
+    Ok(())
 }
 
 /// Marker types for [`User`] and [`AllUsers`].
@@ -335,7 +342,7 @@ impl User<auth::Full> {
         Ok(())
     }
 
-    /// Unset the password (do not allow logins).
+    /// Unset the password (`verify_passwd` always returns `false`).
     pub fn unset_passwd(&mut self) {
         self.hash = Some(("!".into(), false));
     }
@@ -343,12 +350,12 @@ impl User<auth::Full> {
     /// Verify the password. If the hash is empty, this only
     /// returns `true` if `password` is also empty.
     /// Note that this is a blocking operation if the password
-    /// is incorrect. See [`Config::auth_delay`](struct.Config.html#method.auth_delay)
+    /// is incorrect. See [`Config::auth_delay`](crate::Config::auth_delay)
     /// to set the wait time. Default is 3 seconds.
     ///
     /// # Panics
     /// If the User's hash fields are unpopulated, this function will `panic!`
-    /// (see [`AllUsers`](struct.AllUsers.html#shadowfile-handling) for more info).
+    /// (see [`AllUsers`] for more info).
     pub fn verify_passwd(&self, password: impl AsRef<str>) -> bool {
         let &(ref hash, ref encoded) = self.hash.as_ref()
             .expect(USER_AUTH_FULL_EXPECTED_HASH);
@@ -934,10 +941,14 @@ impl AllUsers<auth::Full> {
             shadowstring.push_str(&format!("{}\n", user.shadow_entry()));
         }
 
+        let mut shadow_fd = self.shadow_fd.as_mut()
+            .expect("shadow_fd should exist for AllUsers<auth::Full>");
+
+        reset_file(&mut self.passwd_fd)?;
         self.passwd_fd.write_all(userstring.as_bytes())?;
-        self.shadow_fd.as_ref()
-            .expect("shadow_fd should exist for AllUsers<auth::Full>")
-            .write_all(shadowstring.as_bytes())?;
+
+        reset_file(&mut shadow_fd)?;
+        shadow_fd.write_all(shadowstring.as_bytes())?;
         Ok(())
     }
 }
@@ -959,7 +970,19 @@ impl<A> AllInner for AllUsers<A> {
 }
 
 impl<A> All for AllUsers<A> {}
-
+/*
+#[cfg(not(target_os = "redox"))]
+impl<A> Drop for AllUsers<A> {
+    fn drop(&mut self) {
+        eprintln!("Dropping AllUsers");
+        let _ = flock(self.passwd_fd.as_raw_fd(), FlockArg::Unlock);
+        if let Some(fd) = self.shadow_fd.as_ref() {
+            eprintln!("Shadow");
+            let _ = flock(fd.as_raw_fd(), FlockArg::Unlock);
+        }
+    }
+}
+*/
 /// `AllGroups` provides (borrowed) access to all groups on the system. Note
 /// that this struct implements [`All`] for all of its access functions.
 ///
@@ -1034,6 +1057,7 @@ impl AllGroups {
             groupstring.push_str(&format!("{}\n", group.to_string().as_str()));
         }
 
+        reset_file(&mut self.group_fd)?;
         self.group_fd.write_all(groupstring.as_bytes())?;
         Ok(())
     }
@@ -1056,12 +1080,14 @@ impl AllInner for AllGroups {
 }
 
 impl All for AllGroups {}
-
+/*
+#[cfg(not(target_os = "redox"))]
 impl Drop for AllGroups {
     fn drop(&mut self) {
-        flock(self.group_fd.as_raw_fd(), FlockArg::Unlock);
+        eprintln!("Dropping AllGroups");
+        let _ = flock(self.group_fd.as_raw_fd(), FlockArg::Unlock);
     }
-}
+}*/
 
 #[cfg(test)]
 mod test {
