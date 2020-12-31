@@ -1145,6 +1145,7 @@ mod test {
     }
 
     // *** struct.AllUsers ***
+    #[cfg(feature = "auth")]
     #[test]
     fn get_user() {
         let users = AllUsers::authenticator(test_cfg()).unwrap();
