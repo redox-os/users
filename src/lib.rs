@@ -203,7 +203,7 @@ pub mod auth {
 /// A struct representing a Redox user.
 /// Currently maps to an entry in the `/etc/passwd` file.
 ///
-/// `A` should be a type from [`auth`].
+/// `A` should be a type from [`crate::auth`].
 ///
 /// # Unset vs. Blank Passwords
 /// A note on unset passwords vs. blank passwords. A blank password
@@ -216,8 +216,7 @@ pub mod auth {
 /// hash always returns `false` upon attempted verification. The
 /// most commonly used hash for an unset password is `"!"`, but
 /// this crate makes no distinction. The most common way to unset
-/// the password is to use
-/// [`unset_passwd`](struct.User.html#method.unset_passwd).
+/// the password is to use [`User::unset_passwd`].
 pub struct User<A> {
     /// Username (login name)
     pub user: String,
@@ -242,14 +241,13 @@ pub struct User<A> {
 }
 
 impl<A> User<A> {
-    /// Get a Command to run the user's default shell
-    /// (see [`login_cmd`](struct.User.html#method.login_cmd) for more docs).
+    /// Get a Command to run the user's default shell (see [`User::login_cmd`]
+    /// for more docs).
     pub fn shell_cmd(&self) -> Command { self.login_cmd(&self.shell) }
 
-    /// Provide a login command for the user, which is any
-    /// entry point for starting a user's session, whether
-    /// a shell (use [`shell_cmd`](struct.User.html#method.shell_cmd) instead)
-    /// or a graphical init.
+    /// Provide a login command for the user, which is any entry point for
+    /// starting a user's session, whether a shell (use [`User::shell_cmd`]
+    /// instead) or a graphical init.
     ///
     /// The `Command` will use the user's `uid` and `gid`, its `current_dir`
     /// will be set to the user's home directory, and the follwing enviroment
@@ -318,7 +316,7 @@ impl<A> User<A> {
 /// Additional methods for if this `User` is authenticatable.
 #[cfg(feature = "auth")]
 impl User<auth::Full> {
-    /// Set the password for a user. Make sure that `password`
+    /// Set the password for a user. Make **sure** that `password`
     /// is actually what the user wants as their password (this doesn't).
     ///
     /// To set the password blank, pass `""` as `password`.
@@ -342,20 +340,16 @@ impl User<auth::Full> {
         Ok(())
     }
 
-    /// Unset the password (`verify_passwd` always returns `false`).
+    /// Unset the password ([`User::verify_passwd`] always returns `false`).
     pub fn unset_passwd(&mut self) {
         self.hash = Some(("!".into(), false));
     }
 
-    /// Verify the password. If the hash is empty, this only
-    /// returns `true` if `password` is also empty.
-    /// Note that this is a blocking operation if the password
-    /// is incorrect. See [`Config::auth_delay`](crate::Config::auth_delay)
-    /// to set the wait time. Default is 3 seconds.
+    /// Verify the password. If the hash is empty, this only returns `true` if
+    /// `password` is also empty.
     ///
-    /// # Panics
-    /// If the User's hash fields are unpopulated, this function will `panic!`
-    /// (see [`AllUsers`] for more info).
+    /// Note that this is a blocking operation if the password is incorrect.
+    /// See [`Config::auth_delay`] to set the wait time. Default is 3 seconds.
     pub fn verify_passwd(&self, password: impl AsRef<str>) -> bool {
         let &(ref hash, ref encoded) = self.hash.as_ref()
             .expect(USER_AUTH_FULL_EXPECTED_HASH);
@@ -374,12 +368,8 @@ impl User<auth::Full> {
         verified
     }
 
-    /// Determine if the hash for the password is blank
-    /// (any user can log in as this user with no password).
-    ///
-    /// # Panics
-    /// If the User's hash fields are unpopulated, this function will `panic!`
-    /// (see [`AllUsers`](struct.AllUsers.html#shadowfile-handling) for more info).
+    /// Determine if the hash for the password is blank ([`User::verify_passwd`]
+    /// returns `true` *only* when the password is blank).
     pub fn is_passwd_blank(&self) -> bool {
         let &(ref hash, ref encoded) = self.hash.as_ref()
             .expect(USER_AUTH_FULL_EXPECTED_HASH);
@@ -387,12 +377,7 @@ impl User<auth::Full> {
     }
 
     /// Determine if the hash for the password is unset
-    /// ([`verify_passwd`](struct.User.html#method.verify_passwd)
-    /// returns `false` regardless of input).
-    ///
-    /// # Panics
-    /// If the User's hash fields are unpopulated, this function will `panic!`
-    /// (see [`AllUsers`](struct.AllUsers.html#shadowfile-handling) for more info).
+    /// ([`User::verify_passwd`] returns `false` regardless of input).
     pub fn is_passwd_unset(&self) -> bool {
         let &(ref hash, ref encoded) = self.hash.as_ref()
             .expect(USER_AUTH_FULL_EXPECTED_HASH);
@@ -610,8 +595,20 @@ pub fn get_gid() -> Result<usize> {
 ///
 /// `auth_delay` is not used by [`AllGroups`]
 ///
-/// In most situations, `Config::default()` will work just fine.
-/// The other fields are for finer control if it is required.
+/// In most situations, [`Config::default`](struct.Config.html#impl-Default)
+/// will work just fine. The other fields are for finer control if it is
+/// required.
+///
+/// # Example
+/// ```
+/// # use redox_users::Config;
+/// use std::time::Duration;
+///
+/// let cfg = Config::default()
+///     .min_id(500)
+///     .max_id(1000)
+///     .auth_delay(Duration::from_secs(5));
+/// ```
 #[derive(Clone, Debug)]
 pub struct Config {
     scheme: String,
@@ -639,7 +636,7 @@ impl Config {
         self
     }
 
-    /// Set the scheme relative to which the `AllUsers` or `AllGroups`
+    /// Set the scheme relative to which the [`AllUsers`] or [`AllGroups`]
     /// should be looking for its data files. This is a compromise between
     /// exposing implementation details and providing fine enough
     /// control over the behavior of this API.
@@ -710,20 +707,18 @@ use sealed::{AllInner, Id, Name};
 /// so that the implementations of functions can be implemented
 /// at the trait level. Do not try to implement this trait.
 pub trait All: AllInner {
-    /// Get an iterator borrowing all [`User`](struct.User.html)'s
-    /// or [`Group`](struct.Group.html)'s on the system.
+    /// Get an iterator borrowing all [`User`]s or [`Group`]s on the system.
     fn iter(&self) -> Iter<<Self as AllInner>::Gruser> {
         self.list().iter()
     }
 
-    /// Get an iterator mutably borrowing all [`User`](struct.User.html)'s
-    /// or [`Group`](struct.Group.html)'s on the system.
+    /// Get an iterator mutably borrowing all [`User`]s or [`Group`]s on the
+    /// system.
     fn iter_mut(&mut self) -> IterMut<<Self as AllInner>::Gruser> {
         self.list_mut().iter_mut()
     }
 
-    /// Borrow the [`User`](struct.User.html) or [`Group`](struct.Group.html)
-    /// with a given name.
+    /// Borrow the [`User`] or [`Group`] with a given name.
     ///
     /// # Examples
     ///
@@ -739,14 +734,13 @@ pub trait All: AllInner {
             .find(|gruser| gruser.name() == name.as_ref() )
     }
 
-    /// Mutable version of [`get_by_name`](trait.All.html#method.get_by_name).
+    /// Mutable version of [`All::get_by_name`].
     fn get_mut_by_name(&mut self, name: impl AsRef<str>) -> Option<&mut <Self as AllInner>::Gruser> {
         self.iter_mut()
             .find(|gruser| gruser.name() == name.as_ref() )
     }
 
-    /// Borrow the [`User`](struct.User.html) or [`Group`](struct.Group.html)
-    /// with the given ID.
+    /// Borrow the [`User`] or [`Group`] with the given ID.
     ///
     /// # Examples
     ///
@@ -762,14 +756,14 @@ pub trait All: AllInner {
             .find(|gruser| gruser.id() == id )
     }
 
-    /// Mutable version of [`get_by_id`](trait.All.html#method.get_by_id).
+    /// Mutable version of [`All::get_by_id`].
     fn get_mut_by_id(&mut self, id: usize) -> Option<&mut <Self as AllInner>::Gruser> {
         self.iter_mut()
             .find(|gruser| gruser.id() == id )
     }
 
-    /// Provides an unused id based on the min and max values in
-    /// the [`Config`](struct.Config.html) passed to the `All`'s constructor.
+    /// Provides an unused id based on the min and max values in the [`Config`]
+    /// passed to the `All`'s constructor.
     ///
     /// # Examples
     ///
@@ -787,18 +781,17 @@ pub trait All: AllInner {
         None
     }
 
-    /// Remove a [`User`](struct.User.html) or [`Group`](struct.Group.html)
-    /// from this `All` given it's name. This won't provide an indication
-    /// of whether the user was removed or not, but is guaranteed to work
-    /// if a user with the specified name exists.
+    /// Remove a [`User`] or [`Group`] from this `All` given it's name. This
+    /// won't provide an indication of whether the user was removed or not, but
+    /// is guaranteed to work if a user with the specified name exists.
     fn remove_by_name(&mut self, name: impl AsRef<str>) {
         // Significantly more elegant than other possible solutions.
-        // I wish it could indicate if it removed anything.
+        //TODO: I wish it could indicate if it removed anything.
         self.list_mut()
             .retain(|gruser| gruser.name() != name.as_ref() );
     }
 
-    /// Id version of [`remove_by_name`](trait.All.html#method.remove_by_name).
+    /// Id version of [`All::remove_by_name`].
     fn remove_by_id(&mut self, id: usize) {
         self.list_mut()
             .retain(|gruser| gruser.id() != id );
@@ -812,12 +805,9 @@ pub trait All: AllInner {
 /// Note that everything in this section also applies to [`AllGroups`].
 ///
 /// * If you mutate anything owned by an `AllUsers`, you must call the
-///   [`save`](struct.AllUsers.html#method.save) method in order for those
-///   changes to be applied to the system.
-/// * The API here is kept small on purpose in order to reduce the surface area
-///   for security exploitation. Most mutating actions can be accomplished via
-///   the [`get_mut_by_id`](struct.AllUsers.html#method.get_mut_by_id)
-///   and [`get_mut_by_name`](struct.AllUsers.html#method.get_mut_by_name)
+///   [`AllUsers::save`] in order for those changes to be applied to the system.
+/// * The API here is kept small. Most mutating actions can be accomplished via
+///   the [`All::get_mut_by_id`] and [`All::get_mut_by_name`]
 ///   functions.
 #[derive(Debug)]
 pub struct AllUsers<A> {
@@ -899,8 +889,8 @@ impl AllUsers<auth::Full> {
     /// [Unset vs Blank Passwords](struct.User.html#unset-vs-blank-passwords))
     /// during this call.
     ///
-    /// Make sure to call [`save`](struct.AllUsers.html#method.save)
-    /// in order for the new user to be applied to the system.
+    /// Make sure to call [`AllUsers::save`] in order for the new user to be
+    /// applied to the system.
     //TODO: Take uid/gid as Option<usize> and if none, find an unused ID.
     pub fn add_user(
         &mut self,
@@ -932,7 +922,8 @@ impl AllUsers<auth::Full> {
     }
 
     /// Syncs the data stored in the `AllUsers` instance to the filesystem.
-    /// To apply changes to the system from an `AllUsers`, you MUST call this function!
+    /// To apply changes to the system from an `AllUsers`, you MUST call this
+    /// function!
     pub fn save(&mut self) -> Result<()> {
         let mut userstring = String::new();
         let mut shadowstring = String::new();
@@ -1020,8 +1011,8 @@ impl AllGroups {
 
     /// Adds a group with the specified attributes to this `AllGroups`.
     ///
-    /// Make sure to call [`save`](struct.AllGroups.html#method.save)
-    /// in order for the new group to be applied to the system.
+    /// Make sure to call [`AllGroups::save`] in order for the new group to be
+    /// applied to the system.
     //TODO: Take Option<usize> for gid and find unused ID if None
     pub fn add_group(
         &mut self,
