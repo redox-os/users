@@ -28,7 +28,6 @@
 //! software.
 
 use std::convert::From;
-use std::error::Error;
 use std::fmt::{self, Debug};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -46,12 +45,13 @@ use std::slice::{Iter, IterMut};
 use std::thread;
 use std::time::Duration;
 
+use thiserror::Error;
+
 //#[cfg(not(target_os = "redox"))]
 //use nix::fcntl::{flock, FlockArg};
 
 #[cfg(target_os = "redox")]
 use syscall::flag::{O_EXLOCK, O_SHLOCK};
-use syscall::Error as SyscallError;
 
 const PASSWD_FILE: &'static str = "/etc/passwd";
 const GROUP_FILE: &'static str = "/etc/group";
@@ -70,56 +70,51 @@ const DEFAULT_TIMEOUT: u64 = 3;
 #[cfg(feature = "auth")]
 const USER_AUTH_FULL_EXPECTED_HASH: &str = "A User<auth::Full> had no hash";
 
-pub type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
-
 /// Errors that might happen while using this crate
-#[derive(Debug, PartialEq)]
-pub enum UsersError {
-    Os { reason: String },
+#[derive(Debug, Error)]
+pub enum Error {
+    #[error("os error: {reason}")]
+    Os { reason: &'static str },
+
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+
+    #[error("failed to generate seed: {0}")]
+    Getrandom(#[from] getrandom::Error),
+
+    #[error("")]
+    Argon(#[from] argon2::Error),
+
+    #[error("parse error line {line}: {reason}")]
     Parsing { reason: String, line: usize },
-    NotFound,
-    AlreadyExists
-}
 
-impl fmt::Display for UsersError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            UsersError::Os { reason } => write!(f, "os error: code {}", reason),
-            UsersError::Parsing { reason, line } => {
-                write!(f, "parse error line {}: {}", line, reason)
-            },
-            UsersError::NotFound => write!(f, "user/group not found"),
-            UsersError::AlreadyExists => write!(f, "user/group already exists")
-        }
-    }
-}
+    #[error(transparent)]
+    ParseInt(#[from] std::num::ParseIntError),
 
-impl Error for UsersError {
-    fn description(&self) -> &str { "UsersError" }
+    #[error("user not found")]
+    UserNotFound,
 
-    fn cause(&self) -> Option<&dyn Error> { None }
+    #[error("group not found")]
+    GroupNotFound,
+
+    #[error("user already exists")]
+    UserAlreadyExists,
+
+    #[error("group already exists")]
+    GroupAlreadyExists,
 }
 
 #[inline]
-fn parse_error(line: usize, reason: &str) -> UsersError {
-    UsersError::Parsing {
+fn parse_error(line: usize, reason: &str) -> Error {
+    Error::Parsing {
         reason: reason.into(),
         line,
     }
 }
 
-#[inline]
-fn os_error(reason: &str) -> UsersError {
-    UsersError::Os {
-        reason: reason.into()
-    }
-}
-
-impl From<SyscallError> for UsersError {
-    fn from(syscall_error: SyscallError) -> UsersError {
-        UsersError::Os {
-            reason: format!("{}", syscall_error)
-        }
+impl From<syscall::Error> for Error {
+    fn from(syscall_error: syscall::Error) -> Error {
+        Error::Os { reason: syscall_error.text() }
     }
 }
 
@@ -150,7 +145,7 @@ impl Lock {
 
 /// Naive semi-cross platform file locking (need to support linux for tests).
 #[allow(dead_code)]
-fn locked_file(file: impl AsRef<Path>, _lock: Lock) -> Result<File> {
+fn locked_file(file: impl AsRef<Path>, _lock: Lock) -> Result<File, Error> {
     #[cfg(test)]
     println!("Open file: {}", file.as_ref().display());
 
@@ -177,7 +172,7 @@ fn locked_file(file: impl AsRef<Path>, _lock: Lock) -> Result<File> {
 }
 
 /// Reset a file for rewriting (user/group dbs must be erased before write-out)
-fn reset_file(fd: &mut File) -> Result<()> {
+fn reset_file(fd: &mut File) -> Result<(), Error> {
     fd.set_len(0)?;
     fd.seek(SeekFrom::Start(0))?;
     Ok(())
@@ -271,7 +266,7 @@ impl<A> User<A> {
         command
     }
     
-    fn from_passwd_entry(s: &str, line: usize) -> Result<Self> {
+    fn from_passwd_entry(s: &str, line: usize) -> Result<User<A>, Error> {
         let mut parts = s.split(';');
 
         let user = parts
@@ -325,7 +320,7 @@ impl User<auth::Full> {
     /// is actually what the user wants as their password (this doesn't).
     ///
     /// To set the password blank, pass `""` as `password`.
-    pub fn set_passwd(&mut self, password: impl AsRef<str>) -> Result<()> {
+    pub fn set_passwd(&mut self, password: impl AsRef<str>) -> Result<(), Error> {
         let password = password.as_ref();
 
         self.hash = if password != "" {
@@ -361,7 +356,9 @@ impl User<auth::Full> {
         let password = password.as_ref();
 
         let verified = if *encoded {
-            argon2::verify_encoded(&hash, password.as_bytes()).unwrap()
+            argon2::verify_encoded(&hash, password.as_bytes())
+                //TODO: When does this happen? Should this function return Result?
+                .expect("failed to verify hash")
         } else {
             hash == "" && password == ""
         };
@@ -398,14 +395,13 @@ impl User<auth::Full> {
     }
 
     /// Give this a hash string (not a shadowfile entry!!!)
-    fn populate_hash(&mut self, hash: &str) -> Result<()> {
+    fn populate_hash(&mut self, hash: &str) {
         let encoded = match hash {
             "" => false,
             "!" => false,
             _ => true,
         };
         self.hash = Some((hash.to_string(), encoded));
-        Ok(())
     }
 }
 
@@ -448,7 +444,7 @@ pub struct Group {
 }
 
 impl Group {
-    fn from_group_entry(s: &str, line: usize) -> Result<Self> {
+    fn from_group_entry(s: &str, line: usize) -> Result<Group, Error> {
         let mut parts = s.trim()
             .split(';');
 
@@ -514,11 +510,9 @@ impl Id for Group {
 /// # use redox_users::get_euid;
 /// let euid = get_euid().unwrap();
 /// ```
-pub fn get_euid() -> Result<usize> {
-    match syscall::geteuid() {
-        Ok(euid) => Ok(euid),
-        Err(syscall_error) => Err(From::from(os_error(syscall_error.text())))
-    }
+pub fn get_euid() -> Result<usize, Error> {
+    syscall::geteuid()
+        .map_err(From::from)
 }
 
 /// Gets the current process real user ID.
@@ -534,11 +528,9 @@ pub fn get_euid() -> Result<usize> {
 /// # use redox_users::get_uid;
 /// let uid = get_uid().unwrap();
 /// ```
-pub fn get_uid() -> Result<usize> {
-    match syscall::getuid() {
-        Ok(uid) => Ok(uid),
-        Err(syscall_error) => Err(From::from(os_error(syscall_error.text())))
-    }
+pub fn get_uid() -> Result<usize, Error> {
+    syscall::getuid()
+        .map_err(From::from)
 }
 
 /// Gets the current process effective group ID.
@@ -554,11 +546,9 @@ pub fn get_uid() -> Result<usize> {
 /// # use redox_users::get_egid;
 /// let egid = get_egid().unwrap();
 /// ```
-pub fn get_egid() -> Result<usize> {
-    match syscall::getegid() {
-        Ok(egid) => Ok(egid),
-        Err(syscall_error) => Err(From::from(os_error(syscall_error.text())))
-    }
+pub fn get_egid() -> Result<usize, Error> {
+    syscall::getegid()
+        .map_err(From::from)
 }
 
 /// Gets the current process real group ID.
@@ -574,11 +564,9 @@ pub fn get_egid() -> Result<usize> {
 /// # use redox_users::get_gid;
 /// let gid = get_gid().unwrap();
 /// ```
-pub fn get_gid() -> Result<usize> {
-    match syscall::getgid() {
-        Ok(gid) => Ok(gid),
-        Err(syscall_error) => Err(From::from(os_error(syscall_error.text())))
-    }
+pub fn get_gid() -> Result<usize, Error> {
+    syscall::getgid()
+        .map_err(From::from)
 }
 
 /// A generic configuration that allows fine control of an [`AllUsers`] or
@@ -833,7 +821,7 @@ pub struct AllUsers<A> {
 }
 
 impl<A> AllUsers<A> {
-    fn new(config: Config) -> Result<AllUsers<A>> {
+    fn new(config: Config) -> Result<AllUsers<A>, Error> {
         let mut passwd_fd = locked_file(config.in_scheme(PASSWD_FILE), Lock::Exclusive)?;
         let mut passwd_cntnt = String::new();
         passwd_fd.read_to_string(&mut passwd_cntnt)?;
@@ -857,7 +845,7 @@ impl<A> AllUsers<A> {
 impl AllUsers<auth::Basic> {
     /// Provide access to all user information on the system except
     /// authentication. This is adequate for almost all uses of `AllUsers`.
-    pub fn basic(config: Config) -> Result<AllUsers<auth::Basic>> {
+    pub fn basic(config: Config) -> Result<AllUsers<auth::Basic>, Error> {
         Self::new(config)
     }
 }
@@ -866,7 +854,7 @@ impl AllUsers<auth::Basic> {
 impl AllUsers<auth::Full> {
     /// If access to password related methods for the [`User`]s yielded by this
     /// `AllUsers` is required, use this constructor.
-    pub fn authenticator(config: Config) -> Result<AllUsers<auth::Full>> {
+    pub fn authenticator(config: Config) -> Result<AllUsers<auth::Full>, Error> {
         let mut shadow_fd = locked_file(config.in_scheme(SHADOW_FILE), Lock::Exclusive)?;
         let mut shadow_cntnt = String::new();
         shadow_fd.read_to_string(&mut shadow_cntnt)?;
@@ -889,7 +877,7 @@ impl AllUsers<auth::Full> {
                 .ok_or(parse_error(indx,
                     "error parsing shadowfile: unkown user"
                 ))?
-                .populate_hash(hash)?;
+                .populate_hash(hash);
         }
         
         Ok(new)
@@ -911,31 +899,29 @@ impl AllUsers<auth::Full> {
         name: &str,
         home: &str,
         shell: &str
-    ) -> Result<()> {
-        if self.iter()
-            .any(|user| user.user == login || user.uid == uid)
-        {
-            return Err(From::from(UsersError::AlreadyExists))
+    ) -> Result<(), Error> {
+        if self.iter().any(|user| user.user == login || user.uid == uid) {
+            Err(Error::UserAlreadyExists)
+        } else {
+            self.users.push(User {
+                user: login.into(),
+                uid,
+                gid,
+                name: name.into(),
+                home: home.into(),
+                shell: shell.into(),
+                hash: Some(("!".into(), false)),
+                auth: PhantomData,
+                auth_delay: self.config.auth_delay
+            });
+            Ok(())
         }
-
-        self.users.push(User {
-            user: login.into(),
-            uid,
-            gid,
-            name: name.into(),
-            home: home.into(),
-            shell: shell.into(),
-            hash: Some(("!".into(), false)),
-            auth: PhantomData,
-            auth_delay: self.config.auth_delay
-        });
-        Ok(())
     }
 
     /// Syncs the data stored in the `AllUsers` instance to the filesystem.
     /// To apply changes to the system from an `AllUsers`, you MUST call this
     /// function!
-    pub fn save(&mut self) -> Result<()> {
+    pub fn save(&mut self) -> Result<(), Error> {
         let mut userstring = String::new();
         let mut shadowstring = String::new();
         for user in &self.users {
@@ -1000,7 +986,7 @@ pub struct AllGroups {
 
 impl AllGroups {
     /// Create a new `AllGroups`.
-    pub fn new(config: Config) -> Result<AllGroups> {
+    pub fn new(config: Config) -> Result<AllGroups, Error> {
         let mut group_fd = locked_file(config.in_scheme(GROUP_FILE), Lock::Exclusive)?;
         let mut group_cntnt = String::new();
         group_fd.read_to_string(&mut group_cntnt)?;
@@ -1028,30 +1014,27 @@ impl AllGroups {
         name: &str,
         gid: usize,
         users: &[&str]
-    ) -> Result<()> {
-        if self.iter()
-            .any(|group| group.group == name || group.gid == gid)
-        {
-            return Err(From::from(UsersError::AlreadyExists))
+    ) -> Result<(), Error> {
+        if self.iter().any(|group| group.group == name || group.gid == gid) {
+            Err(Error::GroupAlreadyExists)
+        } else {
+            self.groups.push(Group {
+                group: name.into(),
+                gid,
+                //Might be cleaner... Also breaks...
+                //users: users.iter().map(String::to_string).collect()
+                users: users
+                    .iter()
+                    .map(|user| user.to_string())
+                    .collect()
+            });
+            Ok(())
         }
-
-        //Might be cleaner... Also breaks...
-        //users: users.iter().map(String::to_string).collect()
-        self.groups.push(Group {
-            group: name.into(),
-            gid,
-            users: users
-                .iter()
-                .map(|user| user.to_string())
-                .collect()
-        });
-
-        Ok(())
     }
 
     /// Syncs the data stored in this `AllGroups` instance to the filesystem.
     /// To apply changes from an `AllGroups`, you MUST call this function!
-    pub fn save(&mut self) -> Result<()> {
+    pub fn save(&mut self) -> Result<(), Error> {
         let mut groupstring = String::new();
         for group in &self.groups {
             groupstring.push_str(&group.group_entry());
@@ -1108,14 +1091,14 @@ mod test {
             .scheme(TEST_PREFIX.to_string())
     }
 
-    fn read_locked_file(file: impl AsRef<Path>) -> Result<String> {
+    fn read_locked_file(file: impl AsRef<Path>) -> Result<String, Error> {
         let mut fd = locked_file(file, Lock::Exclusive)?;
         let mut cntnt = String::new();
         fd.read_to_string(&mut cntnt)?;
         Ok(cntnt)
     }
 
-    fn write_locked_file(file: impl AsRef<Path>, cntnt: impl AsRef<[u8]>) -> Result<()> {
+    fn write_locked_file(file: impl AsRef<Path>, cntnt: impl AsRef<[u8]>) -> Result<(), Error> {
         locked_file(file, Lock::Exclusive)?
             .write_all(cntnt.as_ref())?;
         Ok(())

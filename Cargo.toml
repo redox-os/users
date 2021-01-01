@@ -14,6 +14,7 @@ edition = "2018"
 getrandom = { version = "0.2", features = ["std"] }
 redox_syscall = "0.2"
 rust-argon2 = { version = "0.8", optional = true }
+thiserror = "1.0"
 
 #[target.'cfg(not(target_os = "redox"))'.dependencies]
 #nix = "0.19"
