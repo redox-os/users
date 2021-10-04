@@ -226,7 +226,7 @@ pub struct User<A> {
     // Stored password hash text and an indicator to determine if the text is a
     // hash.
     #[cfg(feature = "auth")]
-    hash: Option<(String, bool)>,
+    hash: Option<String>,
     // Failed login delay duration
     auth_delay: Duration,
     auth: PhantomData<A>,
@@ -333,16 +333,16 @@ impl User<auth::Full> {
                 salt.as_bytes(),
                 &config
             )?;
-            Some((hash, true))
+            Some(hash)
         } else {
-            Some(("".into(), false))
+            Some("".into())
         };
         Ok(())
     }
 
     /// Unset the password ([`User::verify_passwd`] always returns `false`).
     pub fn unset_passwd(&mut self) {
-        self.hash = Some(("!".into(), false));
+        self.hash = Some("!".into());
     }
 
     /// Verify the password. If the hash is empty, this only returns `true` if
@@ -351,16 +351,17 @@ impl User<auth::Full> {
     /// Note that this is a blocking operation if the password is incorrect.
     /// See [`Config::auth_delay`] to set the wait time. Default is 3 seconds.
     pub fn verify_passwd(&self, password: impl AsRef<str>) -> bool {
-        let &(ref hash, ref encoded) = self.hash.as_ref()
+        let ref hash = self.hash.as_ref()
             .expect(USER_AUTH_FULL_EXPECTED_HASH);
         let password = password.as_ref();
 
-        let verified = if *encoded {
-            argon2::verify_encoded(&hash, password.as_bytes())
-                //TODO: When does this happen? Should this function return Result?
-                .expect("failed to verify hash")
-        } else {
-            hash == "" && password == ""
+        let verified = match hash.as_str() {
+            "" => password == "",
+            "!" => false,
+            //TODO: When does this panic? Should this function return Result?
+            // Or does it need to simply fail to verify if the
+            _ => argon2::verify_encoded(&hash, password.as_bytes())
+                .expect("failed to verify hash"),
         };
 
         if !verified {
@@ -373,35 +374,23 @@ impl User<auth::Full> {
     /// Determine if the hash for the password is blank ([`User::verify_passwd`]
     /// returns `true` *only* when the password is blank).
     pub fn is_passwd_blank(&self) -> bool {
-        let &(ref hash, ref encoded) = self.hash.as_ref()
+        let ref hash = self.hash.as_ref()
             .expect(USER_AUTH_FULL_EXPECTED_HASH);
-        hash == "" && ! encoded
+        hash.as_str() == ""
     }
 
     /// Determine if the hash for the password is unset
     /// ([`User::verify_passwd`] returns `false` regardless of input).
     pub fn is_passwd_unset(&self) -> bool {
-        let &(ref hash, ref encoded) = self.hash.as_ref()
+        let ref hash = self.hash.as_ref()
             .expect(USER_AUTH_FULL_EXPECTED_HASH);
-        hash != "" && ! encoded
+        hash.as_str() == "!"
     }
 
     fn shadow_entry(&self) -> String {
-        let hashstring = match self.hash {
-            Some((ref hash, _)) => hash,
-            None => panic!(USER_AUTH_FULL_EXPECTED_HASH)
-        };
-        format!("{};{}\n", self.user, hashstring)
-    }
-
-    /// Give this a hash string (not a shadowfile entry!!!)
-    fn populate_hash(&mut self, hash: &str) {
-        let encoded = match hash {
-            "" => false,
-            "!" => false,
-            _ => true,
-        };
-        self.hash = Some((hash.to_string(), encoded));
+        let ref hash = self.hash.as_ref()
+            .expect(USER_AUTH_FULL_EXPECTED_HASH);
+        format!("{};{}\n", self.user, hash)
     }
 }
 
@@ -876,8 +865,7 @@ impl AllUsers<auth::Full> {
                 .find(|user| user.user == name)
                 .ok_or(parse_error(indx,
                     "error parsing shadowfile: unkown user"
-                ))?
-                .populate_hash(hash);
+                ))?.hash = Some(hash.to_string());
         }
         
         Ok(new)
@@ -910,7 +898,7 @@ impl AllUsers<auth::Full> {
                 name: name.into(),
                 home: home.into(),
                 shell: shell.into(),
-                hash: Some(("!".into(), false)),
+                hash: Some("!".into()),
                 auth: PhantomData,
                 auth_delay: self.config.auth_delay
             });
@@ -1148,48 +1136,36 @@ mod test {
 
         let root = users.get_by_id(0).expect("'root' user missing");
         assert_eq!(root.user, "root".to_string());
-        let &(ref hashstring, ref encoded) = root.hash.as_ref().expect("'root' hash is None");
-        assert_eq!(hashstring,
-            &"$argon2i$m=4096,t=10,p=1$Tnc4UVV0N00$ML9LIOujd3nmAfkAwEcSTMPqakWUF0OUiLWrIy0nGLk".to_string());
+        let ref hashstring = root.hash.as_ref().expect("'root' hash is None");
+        assert_eq!(hashstring.as_str(),
+            "$argon2i$m=4096,t=10,p=1$Tnc4UVV0N00$ML9LIOujd3nmAfkAwEcSTMPqakWUF0OUiLWrIy0nGLk");
         assert_eq!(root.uid, 0);
         assert_eq!(root.gid, 0);
         assert_eq!(root.name, "root".to_string());
         assert_eq!(root.home, "file:/root".to_string());
         assert_eq!(root.shell, "file:/bin/ion".to_string());
-        match encoded {
-            true => (),
-            false => panic!("Expected encoded argon hash!")
-        }
 
         let user = users.get_by_name("user").expect("'user' user missing");
         assert_eq!(user.user, "user".to_string());
-        let &(ref hashstring, ref encoded) = user.hash.as_ref().expect("'user' hash is None");
-        assert_eq!(hashstring, &"".to_string());
+        let ref hashstring = user.hash.as_ref().expect("'user' hash is None");
+        assert_eq!(hashstring.as_str(), "");
         assert_eq!(user.uid, 1000);
         assert_eq!(user.gid, 1000);
         assert_eq!(user.name, "user".to_string());
         assert_eq!(user.home, "file:/home/user".to_string());
         assert_eq!(user.shell, "file:/bin/ion".to_string());
-        match encoded {
-            true => panic!("Should not be an argon hash!"),
-            false => ()
-        }
         println!("{:?}", users);
 
         let li = users.get_by_name("li").expect("'li' user missing");
         println!("got li");
         assert_eq!(li.user, "li");
-        let &(ref hashstring, ref encoded) = li.hash.as_ref().expect("'li' hash is None");
-        assert_eq!(hashstring, &"!".to_string());
+        let ref hashstring = li.hash.as_ref().expect("'li' hash is None");
+        assert_eq!(hashstring.as_str(), "!");
         assert_eq!(li.uid, 1007);
         assert_eq!(li.gid, 1007);
         assert_eq!(li.name, "Lorem".to_string());
         assert_eq!(li.home, "file:/home/lorem".to_string());
         assert_eq!(li.shell, "file:/bin/ion".to_string());
-        match encoded {
-            true => panic!("Should not be an argon hash!"),
-            false => ()
-        }
     }
 
     #[cfg(feature = "auth")]
