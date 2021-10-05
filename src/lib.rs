@@ -31,7 +31,6 @@ use std::convert::From;
 use std::fmt::{self, Debug};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::marker::PhantomData;
 #[cfg(target_os = "redox")]
 use std::os::unix::fs::OpenOptionsExt;
 #[cfg(not(target_os = "redox"))]
@@ -67,9 +66,6 @@ const MIN_ID: usize = 1000;
 const MAX_ID: usize = 6000;
 const DEFAULT_TIMEOUT: u64 = 3;
 
-#[cfg(feature = "auth")]
-const USER_AUTH_FULL_EXPECTED_HASH: &str = "A User<auth::Full> had no hash";
-
 /// Errors that might happen while using this crate
 #[derive(Debug, Error)]
 pub enum Error {
@@ -82,6 +78,7 @@ pub enum Error {
     #[error("failed to generate seed: {0}")]
     Getrandom(#[from] getrandom::Error),
 
+    #[cfg(feature = "auth")]
     #[error("")]
     Argon(#[from] argon2::Error),
 
@@ -182,14 +179,27 @@ fn reset_file(fd: &mut File) -> Result<(), Error> {
 pub mod auth {
     /// Marker type indicating that a `User` only has access to world-readable
     /// user information, and cannot authenticate.
-    #[derive(Debug)]
+    #[derive(Debug, Default)]
     pub struct Basic {}
     
     /// Marker type indicating that a `User` has access to all user
     /// information, including password hashes.
     #[cfg(feature = "auth")]
-    #[derive(Debug)]
-    pub struct Full {}
+    #[derive(Debug, Default)]
+    pub struct Full {
+        pub(crate) hash: String,
+    }
+    
+    #[cfg(feature = "auth")]
+    impl Full {
+        pub(crate) fn empty() -> Full {
+            Full { hash: "".into() }
+        }
+        
+        pub(crate) fn unset() -> Full {
+            Full { hash: "!".into() }
+        }
+    }
 }
 
 /// A struct representing a Redox user.
@@ -223,16 +233,14 @@ pub struct User<A> {
     /// Shell path
     pub shell: String,
     
-    // Stored password hash text and an indicator to determine if the text is a
-    // hash.
-    #[cfg(feature = "auth")]
-    hash: Option<String>,
     // Failed login delay duration
     auth_delay: Duration,
-    auth: PhantomData<A>,
+    
+    #[allow(dead_code)]
+    auth: A,
 }
 
-impl<A> User<A> {
+impl<A: Default> User<A> {
     /// Get a Command to run the user's default shell (see [`User::login_cmd`]
     /// for more docs).
     pub fn shell_cmd(&self) -> Command { self.login_cmd(&self.shell) }
@@ -297,19 +305,9 @@ impl<A> User<A> {
             name: name.into(),
             home: home.into(),
             shell: shell.into(),
-            #[cfg(feature = "auth")]
-            hash: None,
-            auth: PhantomData,
+            auth: A::default(),
             auth_delay: Duration::default(),
         })
-    }
-
-    /// Format this user as an entry in `/etc/passwd`.
-    fn passwd_entry(&self) -> String {
-        #[cfg_attr(rustfmt, rustfmt_skip)]
-        format!("{};{};{};{};{};{}\n",
-            self.user, self.uid, self.gid, self.name, self.home, self.shell
-        )
     }
 }
 
@@ -323,7 +321,8 @@ impl User<auth::Full> {
     pub fn set_passwd(&mut self, password: impl AsRef<str>) -> Result<(), Error> {
         let password = password.as_ref();
 
-        self.hash = if password != "" {
+        //TODO: Refactor into auth::Full
+        self.auth.hash = if password != "" {
             let mut buf = [0u8; 8];
             getrandom::getrandom(&mut buf)?;
             let salt = format!("{:X}", u64::from_ne_bytes(buf));
@@ -333,16 +332,16 @@ impl User<auth::Full> {
                 salt.as_bytes(),
                 &config
             )?;
-            Some(hash)
+            hash
         } else {
-            Some("".into())
+            "".into()
         };
         Ok(())
     }
 
     /// Unset the password ([`User::verify_passwd`] always returns `false`).
     pub fn unset_passwd(&mut self) {
-        self.hash = Some("!".into());
+        self.auth = auth::Full::unset();
     }
 
     /// Verify the password. If the hash is empty, this only returns `true` if
@@ -351,19 +350,18 @@ impl User<auth::Full> {
     /// Note that this is a blocking operation if the password is incorrect.
     /// See [`Config::auth_delay`] to set the wait time. Default is 3 seconds.
     pub fn verify_passwd(&self, password: impl AsRef<str>) -> bool {
-        let ref hash = self.hash.as_ref()
-            .expect(USER_AUTH_FULL_EXPECTED_HASH);
         let password = password.as_ref();
 
-        let verified = match hash.as_str() {
+        //TODO: Refactor into auth::Full
+        let verified = match self.auth.hash.as_str() {
             "" => password == "",
             "!" => false,
             //TODO: When does this panic? Should this function return Result?
             // Or does it need to simply fail to verify if the
-            _ => argon2::verify_encoded(&hash, password.as_bytes())
+            hash => argon2::verify_encoded(&hash, password.as_bytes())
                 .expect("failed to verify hash"),
         };
-
+        
         if !verified {
             #[cfg(not(test))] // Make tests run faster
             thread::sleep(self.auth_delay);
@@ -374,23 +372,25 @@ impl User<auth::Full> {
     /// Determine if the hash for the password is blank ([`User::verify_passwd`]
     /// returns `true` *only* when the password is blank).
     pub fn is_passwd_blank(&self) -> bool {
-        let ref hash = self.hash.as_ref()
-            .expect(USER_AUTH_FULL_EXPECTED_HASH);
-        hash.as_str() == ""
+        self.auth.hash.as_str() == ""
     }
 
     /// Determine if the hash for the password is unset
     /// ([`User::verify_passwd`] returns `false` regardless of input).
     pub fn is_passwd_unset(&self) -> bool {
-        let ref hash = self.hash.as_ref()
-            .expect(USER_AUTH_FULL_EXPECTED_HASH);
-        hash.as_str() == "!"
+        self.auth.hash.as_str() == "!"
+    }
+
+    /// Format this user as an entry in `/etc/passwd`.
+    fn passwd_entry(&self) -> String {
+        #[cfg_attr(rustfmt, rustfmt_skip)]
+        format!("{};{};{};{};{};{}\n",
+            self.user, self.uid, self.gid, self.name, self.home, self.shell
+        )
     }
 
     fn shadow_entry(&self) -> String {
-        let ref hash = self.hash.as_ref()
-            .expect(USER_AUTH_FULL_EXPECTED_HASH);
-        format!("{};{}\n", self.user, hash)
+        format!("{};{}\n", self.user, self.auth.hash)
     }
 }
 
@@ -805,11 +805,13 @@ pub struct AllUsers<A> {
     config: Config,
     
     // Hold on to the locked fds to prevent race conditions
+    #[allow(dead_code)]
     passwd_fd: File,
+    #[allow(dead_code)]
     shadow_fd: Option<File>,
 }
 
-impl<A> AllUsers<A> {
+impl<A: Default> AllUsers<A> {
     fn new(config: Config) -> Result<AllUsers<A>, Error> {
         let mut passwd_fd = locked_file(config.in_scheme(PASSWD_FILE), Lock::Exclusive)?;
         let mut passwd_cntnt = String::new();
@@ -865,7 +867,7 @@ impl AllUsers<auth::Full> {
                 .find(|user| user.user == name)
                 .ok_or(parse_error(indx,
                     "error parsing shadowfile: unkown user"
-                ))?.hash = Some(hash.to_string());
+                ))?.auth.hash = hash.to_string();
         }
         
         Ok(new)
@@ -898,8 +900,7 @@ impl AllUsers<auth::Full> {
                 name: name.into(),
                 home: home.into(),
                 shell: shell.into(),
-                hash: Some("!".into()),
-                auth: PhantomData,
+                auth: auth::Full::unset(),
                 auth_delay: self.config.auth_delay
             });
             Ok(())
@@ -1136,8 +1137,7 @@ mod test {
 
         let root = users.get_by_id(0).expect("'root' user missing");
         assert_eq!(root.user, "root".to_string());
-        let ref hashstring = root.hash.as_ref().expect("'root' hash is None");
-        assert_eq!(hashstring.as_str(),
+        assert_eq!(root.auth.hash.as_str(),
             "$argon2i$m=4096,t=10,p=1$Tnc4UVV0N00$ML9LIOujd3nmAfkAwEcSTMPqakWUF0OUiLWrIy0nGLk");
         assert_eq!(root.uid, 0);
         assert_eq!(root.gid, 0);
@@ -1147,8 +1147,7 @@ mod test {
 
         let user = users.get_by_name("user").expect("'user' user missing");
         assert_eq!(user.user, "user".to_string());
-        let ref hashstring = user.hash.as_ref().expect("'user' hash is None");
-        assert_eq!(hashstring.as_str(), "");
+        assert_eq!(user.auth.hash.as_str(), "");
         assert_eq!(user.uid, 1000);
         assert_eq!(user.gid, 1000);
         assert_eq!(user.name, "user".to_string());
@@ -1159,8 +1158,7 @@ mod test {
         let li = users.get_by_name("li").expect("'li' user missing");
         println!("got li");
         assert_eq!(li.user, "li");
-        let ref hashstring = li.hash.as_ref().expect("'li' hash is None");
-        assert_eq!(hashstring.as_str(), "!");
+        assert_eq!(li.auth.hash.as_str(), "!");
         assert_eq!(li.uid, 1007);
         assert_eq!(li.gid, 1007);
         assert_eq!(li.name, "Lorem".to_string());
