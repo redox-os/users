@@ -236,7 +236,82 @@ pub mod auth {
     }
 }
 
-//pub struct UserBuilder
+/// A builder pattern for adding [`User`]s to [`AllUsers`]. Fields are verified
+/// when the group is built via [`AllUsers::add_user`]. See the documentation
+/// of that function for default values.
+///
+/// Note that this builder is not available when the `auth` feature of the
+/// crate is disabled.
+///
+/// # Example
+/// ```no_run
+/// # use redox_users::{AllGroups, Config, GroupBuilder, UserBuilder};
+/// let mut allgs = AllGroups::new(Config::default()).unwrap();
+///
+/// let g = GroupBuilder::new("foobar")
+///     .user("foobar");
+/// let foobar_g = allgs.add_group(g).unwrap();
+///
+/// let u = UserBuilder::new("foobar")
+///     .gid(foobar_g.gid)
+///     .name("Foo Bar")
+///     // Note that this directory will not be created
+///     .home("file:/home/foobar");
+/// ```
+#[cfg(feature = "auth")]
+pub struct UserBuilder {
+    user: String,
+    uid: Option<usize>,
+    gid: Option<usize>,
+    name: Option<String>,
+    home: Option<String>,
+    shell: Option<String>,
+}
+
+#[cfg(feature = "auth")]
+impl UserBuilder {
+    /// Create a new `UserBuilder` with the login name for the new user.
+    pub fn new(user: impl AsRef<str>) -> UserBuilder {
+        UserBuilder {
+            user: user.as_ref().to_string(),
+            uid: None,
+            gid: None,
+            name: None,
+            home: None,
+            shell: None,
+        }
+    }
+
+    /// Set the user id for this user.
+    pub fn uid(mut self, uid: usize) -> UserBuilder {
+        self.uid = Some(uid);
+        self
+    }
+
+    /// Set the primary group id for this user.
+    pub fn gid(mut self, gid: usize) -> UserBuilder {
+        self.gid = Some(gid);
+        self
+    }
+
+    /// Set the GECOS field for this user.
+    pub fn name(mut self, name: impl AsRef<str>) -> UserBuilder {
+        self.name = Some(name.as_ref().to_string());
+        self
+    }
+
+    /// Set the home directory for this user.
+    pub fn home(mut self, home: impl AsRef<str>) -> UserBuilder {
+        self.home = Some(home.as_ref().to_string());
+        self
+    }
+
+    /// Set the login shell for this user.
+    pub fn shell(mut self, shell: impl AsRef<str>) -> UserBuilder {
+        self.shell = Some(shell.as_ref().to_string());
+        self
+    }
+}
 
 /// A struct representing a Redox user.
 /// Currently maps to an entry in the `/etc/passwd` file.
@@ -347,7 +422,6 @@ impl<A: Default> User<A> {
     }
 }
 
-/// Additional methods for if this `User` is authenticatable.
 #[cfg(feature = "auth")]
 impl User<auth::Full> {
     /// Set the password for a user. Make **sure** that `password`
@@ -474,7 +548,7 @@ impl<A> Debug for User<A> {
 /// verified when the `Group` is built, via [`AllGroups::add_group`].
 ///
 /// # Example
-/// ```rust
+/// ```
 /// # use redox_users::GroupBuilder;
 /// // When added, this group will use the first available group id
 /// let mygroup = GroupBuilder::new("group_name");
@@ -509,7 +583,8 @@ impl GroupBuilder {
         self
     }
 
-    /// Add a user to this group.
+    /// Add a user to this group. Call this function multiple times to add more
+    /// users.
     pub fn user(mut self, user: impl AsRef<str>) -> GroupBuilder {
         self.users.push(user.as_ref().to_string());
         self
@@ -976,37 +1051,55 @@ impl AllUsers<auth::Full> {
         Ok(new)
     }
     
-    /// Adds a user with the specified attributes to the `AllUsers`
-    /// instance. Note that the user's password is set unset (see
-    /// [Unset vs Blank Passwords](struct.User.html#unset-vs-blank-passwords))
-    /// during this call.
+    /// Consumes a builder, adding a new user to this `AllUsers`. Returns a
+    /// reference to the created user.
     ///
     /// Make sure to call [`AllUsers::save`] in order for the new user to be
     /// applied to the system.
-    //TODO: Take uid/gid as Option<usize> and if none, find an unused ID.
-    pub fn add_user(
-        &mut self,
-        login: &str,
-        uid: usize,
-        gid: usize,
-        name: &str,
-        home: &str,
-        shell: &str
-    ) -> Result<(), Error> {
-        if self.iter().any(|user| user.user == login || user.uid == uid) {
+    ///
+    /// Note that the user's password is set unset (see
+    /// [Unset vs Blank Passwords](struct.User.html#unset-vs-blank-passwords))
+    /// during this call.
+    ///
+    /// Also note that the user is not added to any groups when this builder is
+    /// consumed. In order to keep the system in a consistent state, it is
+    /// reccomended to also use an instance of [`AllGroups`] to update group
+    /// information when creating new users.
+    ///
+    /// # Defaults
+    /// Fields not passed to the builder before calling this function are as
+    /// follows:
+    /// - `uid`: [`AllUsers::get_unique_id`] is called on self to get the next
+    ///   available id.
+    /// - `gid`: `99`. This is the default UID for the group `nobody`. Note
+    ///   that the user is NOT added to this group in `/etc/groups`.
+    /// - `name`: The login name passed to [`UserBuilder::new`].
+    /// - `home`: `"/"`
+    /// - `shell`: `file:/bin/ion`
+    pub fn add_user(&mut self, builder: UserBuilder) -> Result<&User<auth::Full>, Error> {
+        if !is_valid_name(&builder.user) {
+            return Err(Error::InvalidName { name: builder.user });
+        }
+        
+        let uid = builder.uid.unwrap_or_else(||
+            self.get_unique_id()
+                .expect("no remaining unused user ids")
+        );
+        
+        if self.iter().any(|user| user.user == builder.user || user.uid == uid) {
             Err(Error::UserAlreadyExists)
         } else {
             self.users.push(User {
-                user: login.into(),
+                user: builder.user.clone(),
                 uid,
-                gid,
-                name: name.into(),
-                home: home.into(),
-                shell: shell.into(),
+                gid: builder.gid.unwrap_or(99),
+                name: builder.name.unwrap_or(builder.user),
+                home: builder.home.unwrap_or("/".to_string()),
+                shell: builder.shell.unwrap_or("file:/bin/ion".to_string()),
                 auth: auth::Full::unset(),
                 auth_delay: self.config.auth_delay
             });
-            Ok(())
+            Ok(&self.users[self.users.len() - 1])
         }
     }
 
@@ -1096,11 +1189,19 @@ impl AllGroups {
         })
     }
 
-    /// Consumes a builder, adding a new group to this `AllGroups`.
+    /// Consumes a builder, adding a new group to this `AllGroups`. Returns a
+    /// reference to the created `Group`.
     ///
     /// Make sure to call [`AllGroups::save`] in order for the new group to be
     /// applied to the system.
-    pub fn add_group(&mut self, builder: GroupBuilder) -> Result<(), Error> {
+    ///
+    /// # Defaults
+    /// If a builder is not passed a group id ([`GroupBuilder::gid`]) before
+    /// being passed to this function, [`AllGroups::get_unique_id`] is used.
+    ///
+    /// If the builder is not passed any users ([`GroupBuilder::user`]), the
+    /// group will still be created.
+    pub fn add_group(&mut self, builder: GroupBuilder) -> Result<&Group, Error> {
         let group_exists = self.iter()
             .any(|group| {
                 let gid_taken = if let Some(gid) = builder.gid {
@@ -1110,7 +1211,7 @@ impl AllGroups {
                 };
                 group.group == builder.group || gid_taken
             });
-
+        
         if group_exists {
             Err(Error::GroupAlreadyExists)
         } else if !is_valid_name(&builder.group) {
@@ -1130,7 +1231,7 @@ impl AllGroups {
                 ),
                 users: builder.users,
             });
-            Ok(())
+            Ok(&self.groups[self.groups.len() - 1])
         }
     }
 
@@ -1311,8 +1412,16 @@ mod test {
         let mut users = AllUsers::authenticator(test_cfg()).unwrap();
         // NOT testing `get_unique_id`
         let id = 7099;
+
+        let fb = UserBuilder::new("fb")
+            .uid(id)
+            .gid(id)
+            .name("Foo Bar")
+            .home("/home/foob")
+            .shell("/bin/zsh");
+        
         users
-            .add_user("fb", id, id, "Foo Bar", "/home/foob", "/bin/zsh")
+            .add_user(fb)
             .expect("failed to add user 'fb'");
         //                                            weirdo ^^^^^^^^ :P
         users.save().unwrap();
