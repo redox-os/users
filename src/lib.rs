@@ -68,6 +68,7 @@ const DEFAULT_TIMEOUT: u64 = 3;
 
 /// Errors that might happen while using this crate
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum Error {
     #[error("os error: {reason}")]
     Os { reason: &'static str },
@@ -99,6 +100,13 @@ pub enum Error {
 
     #[error("group already exists")]
     GroupAlreadyExists,
+
+    #[error("invalid name '{name}'")]
+    InvalidName { name: String },
+
+    /// Used for invalid string field values of [`User`]
+    #[error("invalid entry element '{data}'")]
+    InvalidData { data: String },
 }
 
 #[inline]
@@ -175,6 +183,32 @@ fn reset_file(fd: &mut File) -> Result<(), Error> {
     Ok(())
 }
 
+/// Is a string safe to write to `/etc/group` or `/etc/passwd`?
+fn is_safe_string(s: &str) -> bool {
+    !s.contains(';')
+}
+
+const PORTABLE_FILE_NAME_CHARS: &str =
+    "0123456789._-abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+
+/// This function is used by [`UserBuilder`] and [`GroupBuilder`] to determine
+/// if a name for a user/group is valid. It is provided for convenience.
+///
+/// This function is a WIP. It is currently defined as the [POSIX standard
+/// for usernames](https://pubs.opengroup.org/onlinepubs/9699919799/basedefs/V1_chap03.html#tag_03_437)
+/// . The "portable filename character set" is defined as `A-Z`, `a-z`, `0-9`,
+/// and `._-` (see [here](https://pubs.opengroup.org/onlinepubs/9699919799/basedefs/V1_chap03.html#tag_03_282)).
+pub fn is_valid_name(name: &str) -> bool {
+    if let Some(first) = name.chars().next() {
+        first != '-' &&
+            name.chars().all(|c| {
+                PORTABLE_FILE_NAME_CHARS.contains(c)
+            })
+    } else {
+        false
+    }
+}
+
 /// Marker types for [`User`] and [`AllUsers`].
 pub mod auth {
     /// Marker type indicating that a `User` only has access to world-readable
@@ -201,6 +235,8 @@ pub mod auth {
         }
     }
 }
+
+//pub struct UserBuilder
 
 /// A struct representing a Redox user.
 /// Currently maps to an entry in the `/etc/passwd` file.
@@ -382,15 +418,29 @@ impl User<auth::Full> {
     }
 
     /// Format this user as an entry in `/etc/passwd`.
-    fn passwd_entry(&self) -> String {
-        #[cfg_attr(rustfmt, rustfmt_skip)]
-        format!("{};{};{};{};{};{}\n",
-            self.user, self.uid, self.gid, self.name, self.home, self.shell
-        )
+    fn passwd_entry(&self) -> Result<String, Error> {
+        if !is_safe_string(&self.user) {
+            Err(Error::InvalidName { name: self.user.to_string() })
+        } else if !is_safe_string(&self.name) {
+            Err(Error::InvalidData { data: self.name.to_string() })
+        } else if !is_safe_string(&self.home) {
+            Err(Error::InvalidData { data: self.home.to_string() })
+        } else if !is_safe_string(&self.shell) {
+            Err(Error::InvalidData { data: self.shell.to_string() })
+        } else {
+            #[cfg_attr(rustfmt, rustfmt_skip)]
+            Ok(format!("{};{};{};{};{};{}\n",
+                self.user, self.uid, self.gid, self.name, self.home, self.shell
+            ))
+        }
     }
 
-    fn shadow_entry(&self) -> String {
-        format!("{};{}\n", self.user, self.auth.hash)
+    fn shadow_entry(&self) -> Result<String, Error> {
+        if !is_safe_string(&self.user) {
+            Err(Error::InvalidName { name: self.user.to_string() })
+        } else {
+            Ok(format!("{};{}\n", self.user, self.auth.hash))
+        }
     }
 }
 
@@ -417,6 +467,52 @@ impl<A> Debug for User<A> {
             .field("shell", &self.shell)
             .field("auth_delay", &self.auth_delay)
             .finish()
+    }
+}
+
+/// A builder pattern for adding [`Group`]s to [`AllGroups`]. Fields are
+/// verified when the `Group` is built, via [`AllGroups::add_group`].
+///
+/// # Example
+/// ```rust
+/// # use redox_users::GroupBuilder;
+/// // When added, this group will use the first available group id
+/// let mygroup = GroupBuilder::new("group_name");
+///
+/// // A little more stuff:
+/// let other = GroupBuilder::new("special")
+///     .gid(9055)
+///     .user("some_username");
+/// ```
+pub struct GroupBuilder {
+    // Group name
+    group: String,
+    
+    gid: Option<usize>,
+    
+    users: Vec<String>,
+}
+
+impl GroupBuilder {
+    /// Create a new `GroupBuilder` with the given group name.
+    pub fn new(group: impl AsRef<str>) -> GroupBuilder {
+        GroupBuilder {
+            group: group.as_ref().to_string(),
+            gid: None,
+            users: vec![],
+        }
+    }
+
+    /// Set the group id of this group.
+    pub fn gid(mut self, gid: usize) -> GroupBuilder {
+        self.gid = Some(gid);
+        self
+    }
+
+    /// Add a user to this group.
+    pub fn user(mut self, user: impl AsRef<str>) -> GroupBuilder {
+        self.users.push(user.as_ref().to_string());
+        self
     }
 }
 
@@ -461,16 +557,23 @@ impl Group {
         })
     }
 
-    /// Format this group as an entry in `/etc/group`. This
-    /// is an implementation detail, do NOT rely on this trait
-    /// being implemented in future.
-    fn group_entry(&self) -> String {
-        #[cfg_attr(rustfmt, rustfmt_skip)]
-        format!("{};{};{}\n",
-            self.group,
-            self.gid,
-            self.users.join(",").trim_matches(',')
-        )
+    fn group_entry(&self) -> Result<String, Error> {
+        if !is_safe_string(&self.group) {
+            Err(Error::InvalidName { name: self.group.to_string() })
+        } else {
+            for username in self.users.iter() {
+                if !is_safe_string(&username) {
+                    return Err(Error::InvalidData { data: username.to_string() });
+                }
+            }
+            
+            #[cfg_attr(rustfmt, rustfmt_skip)]
+            Ok(format!("{};{};{}\n",
+                self.group,
+                self.gid,
+                self.users.join(",").trim_matches(',')
+            ))
+        }
     }
 }
 
@@ -914,8 +1017,8 @@ impl AllUsers<auth::Full> {
         let mut userstring = String::new();
         let mut shadowstring = String::new();
         for user in &self.users {
-            userstring.push_str(&user.passwd_entry());
-            shadowstring.push_str(&user.shadow_entry());
+            userstring.push_str(&user.passwd_entry()?);
+            shadowstring.push_str(&user.shadow_entry()?);
         }
 
         let mut shadow_fd = self.shadow_fd.as_mut()
@@ -993,29 +1096,39 @@ impl AllGroups {
         })
     }
 
-    /// Adds a group with the specified attributes to this `AllGroups`.
+    /// Consumes a builder, adding a new group to this `AllGroups`.
     ///
     /// Make sure to call [`AllGroups::save`] in order for the new group to be
     /// applied to the system.
-    //TODO: Take Option<usize> for gid and find unused ID if None
-    pub fn add_group(
-        &mut self,
-        name: &str,
-        gid: usize,
-        users: &[&str]
-    ) -> Result<(), Error> {
-        if self.iter().any(|group| group.group == name || group.gid == gid) {
+    pub fn add_group(&mut self, builder: GroupBuilder) -> Result<(), Error> {
+        let group_exists = self.iter()
+            .any(|group| {
+                let gid_taken = if let Some(gid) = builder.gid {
+                    group.gid == gid
+                } else {
+                    false
+                };
+                group.group == builder.group || gid_taken
+            });
+
+        if group_exists {
             Err(Error::GroupAlreadyExists)
+        } else if !is_valid_name(&builder.group) {
+            Err(Error::InvalidName { name: builder.group })
         } else {
+            for username in builder.users.iter() {
+                if !is_valid_name(username) {
+                    return Err(Error::InvalidName { name: username.to_string() });
+                }
+            }
+            
             self.groups.push(Group {
-                group: name.into(),
-                gid,
-                //Might be cleaner... Also breaks...
-                //users: users.iter().map(String::to_string).collect()
-                users: users
-                    .iter()
-                    .map(|user| user.to_string())
-                    .collect()
+                group: builder.group,
+                gid: builder.gid.unwrap_or_else(||
+                    self.get_unique_id()
+                        .expect("no remaining unused group IDs")
+                ),
+                users: builder.users,
             });
             Ok(())
         }
@@ -1026,7 +1139,7 @@ impl AllGroups {
     pub fn save(&mut self) -> Result<(), Error> {
         let mut groupstring = String::new();
         for group in &self.groups {
-            groupstring.push_str(&group.group_entry());
+            groupstring.push_str(&group.group_entry()?);
         }
 
         reset_file(&mut self.group_fd)?;
@@ -1072,6 +1185,32 @@ mod test {
         let mut complete = String::from(TEST_PREFIX);
         complete.push_str(filename);
         complete
+    }
+
+    #[test]
+    fn test_safe_string() {
+        assert!(is_safe_string("Hello\\$!"));
+        assert!(!is_safe_string("semicolons are awesome; yeah!"));
+    }
+
+    #[test]
+    fn test_portable_filename() {
+        let valid = |s| {
+            assert!(is_valid_name(s));
+        };
+        let invld = |s| {
+            assert!(!is_valid_name(s));
+        };
+        valid("valid");
+        valid("vld.io");
+        valid("hyphen-ated");
+        valid("under_scores");
+        valid("1334");
+        
+        invld("-no_flgs");
+        invld("invalid!");
+        invld("also:invalid");
+        invld("coolie-o?");
     }
 
     fn test_cfg() -> Config {
@@ -1264,11 +1403,15 @@ mod test {
 
     #[test]
     fn manip_group() {
-        let mut groups = AllGroups::new(test_cfg()).unwrap();
-        // NOT testing `get_unique_id`
         let id = 7099;
-
-        groups.add_group("fb", id, &["fb"]).unwrap();
+        let mut groups = AllGroups::new(test_cfg()).unwrap();
+        
+        let fb = GroupBuilder::new("fb")
+            // NOT testing `get_unique_id`
+            .gid(id)
+            .user("fb");
+        
+        groups.add_group(fb).unwrap();
         groups.save().unwrap();
         let file_content = read_locked_file(test_prefix(GROUP_FILE)).unwrap();
         assert_eq!(
@@ -1316,8 +1459,10 @@ mod test {
     #[test]
     fn empty_group() {
         let mut groups = AllGroups::new(test_cfg()).unwrap();
+        let nobody = GroupBuilder::new("nobody")
+            .gid(2260);
         
-        groups.add_group("nobody", 2260, &[]).unwrap();
+        groups.add_group(nobody).unwrap();
         groups.save().unwrap();
         let file_content = read_locked_file(test_prefix(GROUP_FILE)).unwrap();
         assert_eq!(
