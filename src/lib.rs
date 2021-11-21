@@ -28,7 +28,7 @@
 //! software.
 
 use std::convert::From;
-use std::fmt::{self, Debug};
+use std::fmt::Debug;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 #[cfg(target_os = "redox")]
@@ -211,6 +211,10 @@ pub fn is_valid_name(name: &str) -> bool {
 
 /// Marker types for [`User`] and [`AllUsers`].
 pub mod auth {
+    use std::fmt;
+    
+    use crate::Error;
+    
     /// Marker type indicating that a `User` only has access to world-readable
     /// user information, and cannot authenticate.
     #[derive(Debug, Default)]
@@ -219,7 +223,7 @@ pub mod auth {
     /// Marker type indicating that a `User` has access to all user
     /// information, including password hashes.
     #[cfg(feature = "auth")]
-    #[derive(Debug, Default)]
+    #[derive(Default)]
     pub struct Full {
         pub(crate) hash: String,
     }
@@ -230,8 +234,52 @@ pub mod auth {
             Full { hash: "".into() }
         }
         
+        pub(crate) fn is_empty(&self) -> bool {
+            &self.hash == ""
+        }
+        
         pub(crate) fn unset() -> Full {
             Full { hash: "!".into() }
+        }
+        
+        pub(crate) fn is_unset(&self) -> bool {
+            &self.hash == "!"
+        }
+        
+        pub(crate) fn passwd(pw: &str) -> Result<Full, Error> {
+            Ok(if pw != "" {
+                let mut buf = [0u8; 8];
+                getrandom::getrandom(&mut buf)?;
+                let salt = format!("{:X}", u64::from_ne_bytes(buf));
+                let config = argon2::Config::default();
+                let hash = argon2::hash_encoded(
+                    pw.as_bytes(),
+                    salt.as_bytes(),
+                    &config
+                )?;
+                Full { hash }
+            } else {
+                Full::empty()
+            })
+        }
+        
+        pub(crate) fn verify(&self, pw: &str) -> bool {
+            match self.hash.as_str() {
+                "" => pw == "",
+                "!" => false,
+                //TODO: When does this panic? Should this function return
+                // Result? Or does it need to simply fail to verify if
+                // verify_encoded() fails?
+                hash => argon2::verify_encoded(&hash, pw.as_bytes())
+                    .expect("failed to verify hash"),
+            }
+        }
+    }
+    
+    impl fmt::Debug for Full {
+        fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            f.debug_struct("Full")
+                .finish()
         }
     }
 }
@@ -330,6 +378,7 @@ impl UserBuilder {
 /// most commonly used hash for an unset password is `"!"`, but
 /// this crate makes no distinction. The most common way to unset
 /// the password is to use [`User::unset_passwd`].
+#[derive(Debug)]
 pub struct User<A> {
     /// Username (login name)
     pub user: String,
@@ -429,23 +478,7 @@ impl User<auth::Full> {
     ///
     /// To set the password blank, pass `""` as `password`.
     pub fn set_passwd(&mut self, password: impl AsRef<str>) -> Result<(), Error> {
-        let password = password.as_ref();
-
-        //TODO: Refactor into auth::Full
-        self.auth.hash = if password != "" {
-            let mut buf = [0u8; 8];
-            getrandom::getrandom(&mut buf)?;
-            let salt = format!("{:X}", u64::from_ne_bytes(buf));
-            let config = argon2::Config::default();
-            let hash = argon2::hash_encoded(
-                password.as_bytes(),
-                salt.as_bytes(),
-                &config
-            )?;
-            hash
-        } else {
-            "".into()
-        };
+        self.auth = auth::Full::passwd(password.as_ref())?;
         Ok(())
     }
 
@@ -460,18 +493,7 @@ impl User<auth::Full> {
     /// Note that this is a blocking operation if the password is incorrect.
     /// See [`Config::auth_delay`] to set the wait time. Default is 3 seconds.
     pub fn verify_passwd(&self, password: impl AsRef<str>) -> bool {
-        let password = password.as_ref();
-
-        //TODO: Refactor into auth::Full
-        let verified = match self.auth.hash.as_str() {
-            "" => password == "",
-            "!" => false,
-            //TODO: When does this panic? Should this function return Result?
-            // Or does it need to simply fail to verify if the
-            hash => argon2::verify_encoded(&hash, password.as_bytes())
-                .expect("failed to verify hash"),
-        };
-        
+        let verified = self.auth.verify(password.as_ref());
         if !verified {
             #[cfg(not(test))] // Make tests run faster
             thread::sleep(self.auth_delay);
@@ -482,13 +504,13 @@ impl User<auth::Full> {
     /// Determine if the hash for the password is blank ([`User::verify_passwd`]
     /// returns `true` *only* when the password is blank).
     pub fn is_passwd_blank(&self) -> bool {
-        self.auth.hash.as_str() == ""
+        self.auth.is_empty()
     }
 
     /// Determine if the hash for the password is unset
     /// ([`User::verify_passwd`] returns `false` regardless of input).
     pub fn is_passwd_unset(&self) -> bool {
-        self.auth.hash.as_str() == "!"
+        self.auth.is_unset()
     }
 
     /// Format this user as an entry in `/etc/passwd`.
@@ -508,7 +530,7 @@ impl User<auth::Full> {
             ))
         }
     }
-
+    
     fn shadow_entry(&self) -> Result<String, Error> {
         if !is_safe_string(&self.user) {
             Err(Error::InvalidName { name: self.user.to_string() })
@@ -527,20 +549,6 @@ impl<A> Name for User<A> {
 impl<A> Id for User<A> {
     fn id(&self) -> usize {
         self.uid
-    }
-}
-
-impl<A> Debug for User<A> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.debug_struct("User")
-            .field("user", &self.user)
-            .field("uid", &self.uid)
-            .field("gid", &self.gid)
-            .field("name", &self.name)
-            .field("home", &self.home)
-            .field("shell", &self.shell)
-            .field("auth_delay", &self.auth_delay)
-            .finish()
     }
 }
 
