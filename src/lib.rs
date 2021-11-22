@@ -67,7 +67,8 @@ const MIN_ID: usize = 1000;
 const MAX_ID: usize = 6000;
 const DEFAULT_TIMEOUT: u64 = 3;
 
-const USERNAME_LEN_LIMIT: usize = 32;
+const USERNAME_LEN_MIN: usize = 3;
+const USERNAME_LEN_MAX: usize = 32;
 
 /// Errors that might happen while using this crate
 #[derive(Debug, Error)]
@@ -202,9 +203,9 @@ const PORTABLE_FILE_NAME_CHARS: &str =
 /// . The "portable filename character set" is defined as `A-Z`, `a-z`, `0-9`,
 /// and `._-` (see [here](https://pubs.opengroup.org/onlinepubs/9699919799/basedefs/V1_chap03.html#tag_03_282)).
 ///
-/// Usernames may not be more than 32 characters in length.
+/// Usernames may not be more than 32 or less than 3 characters in length.
 pub fn is_valid_name(name: &str) -> bool {
-    if name.len() > USERNAME_LEN_LIMIT {
+    if name.len() < USERNAME_LEN_MIN || name.len() > USERNAME_LEN_MAX {
         false
     } else if let Some(first) = name.chars().next() {
         first != '-' &&
@@ -1140,10 +1141,15 @@ impl AllUsers<auth::Full> {
 
         // Need to be careful to prevent allocations here so that
         // shadowstring can be zeroed when this process is complete.
-        //TODO: 86 is a best guess at hash length
+        // 1 is suppossedly parallelism, not sure exactly what this means.
+        // 16 is the max length of a u64, which is used as the salt.
         // 2 accounts for the semicolon separator and newline
+        let acfg = argon2::Config::default();
+        let argon_len = argon2::encoded_len(
+            acfg.variant, acfg.mem_cost, acfg.time_cost,
+            1, 16, acfg.hash_length) as usize;
         let mut shadowstring = String::with_capacity(
-            self.users.len() * (USERNAME_LEN_LIMIT + 86 + 2)
+            self.users.len() * (USERNAME_LEN_MAX + argon_len + 2)
         );
 
         for user in &self.users {
@@ -1355,6 +1361,8 @@ mod test {
         invld("invalid!");
         invld("also:invalid");
         invld("coolie-o?");
+        invld("sh");
+        invld("avery_very_very_very_loooooooonnggg-username");
     }
 
     fn test_cfg() -> Config {
@@ -1438,9 +1446,9 @@ mod test {
         assert_eq!(user.shell, "file:/bin/ion".to_string());
         println!("{:?}", users);
 
-        let li = users.get_by_name("li").expect("'li' user missing");
-        println!("got li");
-        assert_eq!(li.user, "li");
+        let li = users.get_by_name("loip").expect("'loip' user missing");
+        println!("got loip");
+        assert_eq!(li.user, "loip");
         assert_eq!(li.auth.hash.as_str(), "!");
         assert_eq!(li.uid, 1007);
         assert_eq!(li.gid, 1007);
@@ -1456,7 +1464,7 @@ mod test {
         // NOT testing `get_unique_id`
         let id = 7099;
 
-        let fb = UserBuilder::new("fb")
+        let fb = UserBuilder::new("fbar")
             .uid(id)
             .gid(id)
             .name("Foo Bar")
@@ -1465,7 +1473,7 @@ mod test {
         
         users
             .add_user(fb)
-            .expect("failed to add user 'fb'");
+            .expect("failed to add user 'fbar'");
         //                                            weirdo ^^^^^^^^ :P
         users.save().unwrap();
         let p_file_content = read_locked_file(test_prefix(PASSWD_FILE)).unwrap();
@@ -1474,21 +1482,22 @@ mod test {
             concat!(
                 "root;0;0;root;file:/root;file:/bin/ion\n",
                 "user;1000;1000;user;file:/home/user;file:/bin/ion\n",
-                "li;1007;1007;Lorem;file:/home/lorem;file:/bin/ion\n",
-                "fb;7099;7099;Foo Bar;/home/foob;/bin/zsh\n"
+                "loip;1007;1007;Lorem;file:/home/lorem;file:/bin/ion\n",
+                "fbar;7099;7099;Foo Bar;/home/foob;/bin/zsh\n"
             )
         );
         let s_file_content = read_locked_file(test_prefix(SHADOW_FILE)).unwrap();
         assert_eq!(s_file_content, concat!(
             "root;$argon2i$m=4096,t=10,p=1$Tnc4UVV0N00$ML9LIOujd3nmAfkAwEcSTMPqakWUF0OUiLWrIy0nGLk\n",
             "user;\n",
-            "li;!\n",
-            "fb;!\n"
+            "loip;!\n",
+            "fbar;!\n"
         ));
 
         {
             println!("{:?}", users);
-            let fb = users.get_mut_by_name("fb").expect("'fb' user missing");
+            let fb = users.get_mut_by_name("fbar")
+                .expect("'fbar' user missing");
             fb.shell = "/bin/fish".to_string(); // That's better
             fb.set_passwd("").unwrap();
         }
@@ -1499,16 +1508,16 @@ mod test {
             concat!(
                 "root;0;0;root;file:/root;file:/bin/ion\n",
                 "user;1000;1000;user;file:/home/user;file:/bin/ion\n",
-                "li;1007;1007;Lorem;file:/home/lorem;file:/bin/ion\n",
-                "fb;7099;7099;Foo Bar;/home/foob;/bin/fish\n"
+                "loip;1007;1007;Lorem;file:/home/lorem;file:/bin/ion\n",
+                "fbar;7099;7099;Foo Bar;/home/foob;/bin/fish\n"
             )
         );
         let s_file_content = read_locked_file(test_prefix(SHADOW_FILE)).unwrap();
         assert_eq!(s_file_content, concat!(
             "root;$argon2i$m=4096,t=10,p=1$Tnc4UVV0N00$ML9LIOujd3nmAfkAwEcSTMPqakWUF0OUiLWrIy0nGLk\n",
             "user;\n",
-            "li;!\n",
-            "fb;\n"
+            "loip;!\n",
+            "fbar;\n"
         ));
 
         users.remove_by_id(id);
@@ -1519,7 +1528,7 @@ mod test {
             concat!(
                 "root;0;0;root;file:/root;file:/bin/ion\n",
                 "user;1000;1000;user;file:/home/user;file:/bin/ion\n",
-                "li;1007;1007;Lorem;file:/home/lorem;file:/bin/ion\n"
+                "loip;1007;1007;Lorem;file:/home/lorem;file:/bin/ion\n"
             )
         );
     }
@@ -1558,10 +1567,10 @@ mod test {
         let id = 7099;
         let mut groups = AllGroups::new(test_cfg()).unwrap();
         
-        let fb = GroupBuilder::new("fb")
+        let fb = GroupBuilder::new("fbar")
             // NOT testing `get_unique_id`
             .gid(id)
-            .user("fb");
+            .user("fbar");
         
         groups.add_group(fb).unwrap();
         groups.save().unwrap();
@@ -1572,13 +1581,13 @@ mod test {
                 "root;0;root\n",
                 "user;1000;user\n",
                 "wheel;1;user,root\n",
-                "li;1007;li\n",
-                "fb;7099;fb\n"
+                "loip;1007;loip\n",
+                "fbar;7099;fbar\n"
             )
         );
 
         {
-            let fb = groups.get_mut_by_name("fb").unwrap();
+            let fb = groups.get_mut_by_name("fbar").unwrap();
             fb.users.push("user".to_string());
         }
         groups.save().unwrap();
@@ -1589,8 +1598,8 @@ mod test {
                 "root;0;root\n",
                 "user;1000;user\n",
                 "wheel;1;user,root\n",
-                "li;1007;li\n",
-                "fb;7099;fb,user\n"
+                "loip;1007;loip\n",
+                "fbar;7099;fbar,user\n"
             )
         );
 
@@ -1603,7 +1612,7 @@ mod test {
                 "root;0;root\n",
                 "user;1000;user\n",
                 "wheel;1;user,root\n",
-                "li;1007;li\n"
+                "loip;1007;loip\n"
             )
         );
     }
@@ -1623,7 +1632,7 @@ mod test {
                 "root;0;root\n",
                 "user;1000;user\n",
                 "wheel;1;user,root\n",
-                "li;1007;li\n",
+                "loip;1007;loip\n",
                 "nobody;2260;\n",
             )
         );
@@ -1641,7 +1650,7 @@ mod test {
                 "root;0;root\n",
                 "user;1000;user\n",
                 "wheel;1;user,root\n",
-                "li;1007;li\n"
+                "loip;1007;loip\n"
             )
         );
     }
