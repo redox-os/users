@@ -45,6 +45,7 @@ use std::thread;
 use std::time::Duration;
 
 use thiserror::Error;
+use zeroize::Zeroize;
 
 //#[cfg(not(target_os = "redox"))]
 //use nix::fcntl::{flock, FlockArg};
@@ -65,6 +66,8 @@ const DEFAULT_SCHEME: &'static str = "";
 const MIN_ID: usize = 1000;
 const MAX_ID: usize = 6000;
 const DEFAULT_TIMEOUT: u64 = 3;
+
+const USERNAME_LEN_LIMIT: usize = 32;
 
 /// Errors that might happen while using this crate
 #[derive(Debug, Error)]
@@ -194,12 +197,16 @@ const PORTABLE_FILE_NAME_CHARS: &str =
 /// This function is used by [`UserBuilder`] and [`GroupBuilder`] to determine
 /// if a name for a user/group is valid. It is provided for convenience.
 ///
-/// This function is a WIP. It is currently defined as the [POSIX standard
+/// Usernames must match the [POSIX standard
 /// for usernames](https://pubs.opengroup.org/onlinepubs/9699919799/basedefs/V1_chap03.html#tag_03_437)
 /// . The "portable filename character set" is defined as `A-Z`, `a-z`, `0-9`,
 /// and `._-` (see [here](https://pubs.opengroup.org/onlinepubs/9699919799/basedefs/V1_chap03.html#tag_03_282)).
+///
+/// Usernames may not be more than 32 characters in length.
 pub fn is_valid_name(name: &str) -> bool {
-    if let Some(first) = name.chars().next() {
+    if name.len() > USERNAME_LEN_LIMIT {
+        false
+    } else if let Some(first) = name.chars().next() {
         first != '-' &&
             name.chars().all(|c| {
                 PORTABLE_FILE_NAME_CHARS.contains(c)
@@ -213,6 +220,8 @@ pub fn is_valid_name(name: &str) -> bool {
 pub mod auth {
     use std::fmt;
     
+    use zeroize::Zeroize;
+    
     use crate::Error;
     
     /// Marker type indicating that a `User` only has access to world-readable
@@ -223,7 +232,8 @@ pub mod auth {
     /// Marker type indicating that a `User` has access to all user
     /// information, including password hashes.
     #[cfg(feature = "auth")]
-    #[derive(Default)]
+    #[derive(Default, Zeroize)]
+    #[zeroize(drop)]
     pub struct Full {
         pub(crate) hash: String,
     }
@@ -250,14 +260,18 @@ pub mod auth {
             Ok(if pw != "" {
                 let mut buf = [0u8; 8];
                 getrandom::getrandom(&mut buf)?;
-                let salt = format!("{:X}", u64::from_ne_bytes(buf));
+                let mut salt = format!("{:X}", u64::from_ne_bytes(buf));
+                
                 let config = argon2::Config::default();
-                let hash = argon2::hash_encoded(
+                let hash: String = argon2::hash_encoded(
                     pw.as_bytes(),
                     salt.as_bytes(),
                     &config
                 )?;
-                Full { hash }
+                
+                buf.zeroize();
+                salt.zeroize();
+                Full { hash } // note that move == shallow copy in Rust
             } else {
                 Full::empty()
             })
@@ -477,6 +491,9 @@ impl User<auth::Full> {
     /// is actually what the user wants as their password (this doesn't).
     ///
     /// To set the password blank, pass `""` as `password`.
+    ///
+    /// Note that `password` is taken as a reference, so it is up to the caller
+    /// to properly zero sensitive memory (see `zeroize` on crates.io).
     pub fn set_passwd(&mut self, password: impl AsRef<str>) -> Result<(), Error> {
         self.auth = auth::Full::passwd(password.as_ref())?;
         Ok(())
@@ -492,6 +509,9 @@ impl User<auth::Full> {
     ///
     /// Note that this is a blocking operation if the password is incorrect.
     /// See [`Config::auth_delay`] to set the wait time. Default is 3 seconds.
+    ///
+    /// Note that `password` is taken as a reference, so it is up to the caller
+    /// to properly zero sensitive memory (see `zeroize` on crates.io).
     pub fn verify_passwd(&self, password: impl AsRef<str>) -> bool {
         let verified = self.auth.verify(password.as_ref());
         if !verified {
@@ -1056,6 +1076,7 @@ impl AllUsers<auth::Full> {
                 ))?.auth.hash = hash.to_string();
         }
         
+        shadow_cntnt.zeroize();
         Ok(new)
     }
     
@@ -1116,10 +1137,22 @@ impl AllUsers<auth::Full> {
     /// function!
     pub fn save(&mut self) -> Result<(), Error> {
         let mut userstring = String::new();
-        let mut shadowstring = String::new();
+
+        // Need to be careful to prevent allocations here so that
+        // shadowstring can be zeroed when this process is complete.
+        //TODO: 86 is a best guess at hash length
+        // 2 accounts for the semicolon separator and newline
+        let mut shadowstring = String::with_capacity(
+            self.users.len() * (USERNAME_LEN_LIMIT + 86 + 2)
+        );
+
         for user in &self.users {
             userstring.push_str(&user.passwd_entry()?);
-            shadowstring.push_str(&user.shadow_entry()?);
+
+            let mut shadow_entry = user.shadow_entry()?;
+            shadowstring.push_str(&shadow_entry);
+
+            shadow_entry.zeroize();
         }
 
         let mut shadow_fd = self.shadow_fd.as_mut()
@@ -1130,6 +1163,8 @@ impl AllUsers<auth::Full> {
 
         reset_file(&mut shadow_fd)?;
         shadow_fd.write_all(shadowstring.as_bytes())?;
+
+        shadowstring.zeroize();
         Ok(())
     }
 }

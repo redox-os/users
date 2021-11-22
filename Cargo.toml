@@ -15,6 +15,7 @@ getrandom = { version = "0.2", features = ["std"] }
 redox_syscall = "0.2"
 rust-argon2 = { version = "0.8", optional = true }
 thiserror = "1.0"
+zeroize = { version = "1.4", features = ["zeroize_derive"], optional = true }
 
 #[target.'cfg(not(target_os = "redox"))'.dependencies]
 #nix = "0.19"
@@ -24,5 +25,5 @@ default = ["auth"]
 
 # Enable password authentication using argon2. Some API may not be available
 # without default features.
-auth = ["rust-argon2"]
+auth = ["rust-argon2", "zeroize"]
 
