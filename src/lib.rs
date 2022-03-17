@@ -45,6 +45,7 @@ use std::thread;
 use std::time::Duration;
 
 use thiserror::Error;
+#[cfg(feature = "auth")]
 use zeroize::Zeroize;
 
 //#[cfg(not(target_os = "redox"))]
@@ -219,10 +220,13 @@ pub fn is_valid_name(name: &str) -> bool {
 
 /// Marker types for [`User`] and [`AllUsers`].
 pub mod auth {
+    #[cfg(feature = "auth")]
     use std::fmt;
 
+    #[cfg(feature = "auth")]
     use zeroize::Zeroize;
 
+    #[cfg(feature = "auth")]
     use crate::Error;
 
     /// Marker type indicating that a `User` only has access to world-readable
@@ -291,6 +295,7 @@ pub mod auth {
         }
     }
 
+    #[cfg(feature = "auth")]
     impl fmt::Debug for Full {
         fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
             f.debug_struct("Full")
