@@ -1,6 +1,6 @@
 [package]
 name = "redox_users"
-version = "0.4.0"
+version = "0.4.1"
 authors = ["Jose Narvaez <goyox86@gmail.com>", "Wesley Hershberger <mggmugginsmc@gmail.com>"]
 description = "A Rust library to access Redox users and groups functionality"
 license = "MIT"
@@ -12,7 +12,7 @@ edition = "2018"
 
 [dependencies]
 getrandom = { version = "0.2", features = ["std"] }
-redox_syscall = "0.2"
+redox_syscall = "0.2.11"
 rust-argon2 = { version = "0.8", optional = true }
 thiserror = "1.0"
 zeroize = { version = "1.4", features = ["zeroize_derive"], optional = true }

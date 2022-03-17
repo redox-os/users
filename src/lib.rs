@@ -142,7 +142,7 @@ impl Lock {
             Lock::Exclusive => O_EXLOCK,
         }) as i32
     }
-    
+
     /*#[cfg(not(target_os = "redox"))]
     fn as_flock(self) -> FlockArg {
         match self {
@@ -220,16 +220,16 @@ pub fn is_valid_name(name: &str) -> bool {
 /// Marker types for [`User`] and [`AllUsers`].
 pub mod auth {
     use std::fmt;
-    
+
     use zeroize::Zeroize;
-    
+
     use crate::Error;
-    
+
     /// Marker type indicating that a `User` only has access to world-readable
     /// user information, and cannot authenticate.
     #[derive(Debug, Default)]
     pub struct Basic {}
-    
+
     /// Marker type indicating that a `User` has access to all user
     /// information, including password hashes.
     #[cfg(feature = "auth")]
@@ -238,38 +238,38 @@ pub mod auth {
     pub struct Full {
         pub(crate) hash: String,
     }
-    
+
     #[cfg(feature = "auth")]
     impl Full {
         pub(crate) fn empty() -> Full {
             Full { hash: "".into() }
         }
-        
+
         pub(crate) fn is_empty(&self) -> bool {
             &self.hash == ""
         }
-        
+
         pub(crate) fn unset() -> Full {
             Full { hash: "!".into() }
         }
-        
+
         pub(crate) fn is_unset(&self) -> bool {
             &self.hash == "!"
         }
-        
+
         pub(crate) fn passwd(pw: &str) -> Result<Full, Error> {
             Ok(if pw != "" {
                 let mut buf = [0u8; 8];
                 getrandom::getrandom(&mut buf)?;
                 let mut salt = format!("{:X}", u64::from_ne_bytes(buf));
-                
+
                 let config = argon2::Config::default();
                 let hash: String = argon2::hash_encoded(
                     pw.as_bytes(),
                     salt.as_bytes(),
                     &config
                 )?;
-                
+
                 buf.zeroize();
                 salt.zeroize();
                 Full { hash } // note that move == shallow copy in Rust
@@ -277,7 +277,7 @@ pub mod auth {
                 Full::empty()
             })
         }
-        
+
         pub(crate) fn verify(&self, pw: &str) -> bool {
             match self.hash.as_str() {
                 "" => pw == "",
@@ -290,7 +290,7 @@ pub mod auth {
             }
         }
     }
-    
+
     impl fmt::Debug for Full {
         fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
             f.debug_struct("Full")
@@ -407,10 +407,10 @@ pub struct User<A> {
     pub home: String,
     /// Shell path
     pub shell: String,
-    
+
     // Failed login delay duration
     auth_delay: Duration,
-    
+
     #[allow(dead_code)]
     auth: A,
 }
@@ -448,7 +448,7 @@ impl<A: Default> User<A> {
             .env("SHELL", &self.shell);
         command
     }
-    
+
     fn from_passwd_entry(s: &str, line: usize) -> Result<User<A>, Error> {
         let mut parts = s.split(';');
 
@@ -551,7 +551,7 @@ impl User<auth::Full> {
             ))
         }
     }
-    
+
     fn shadow_entry(&self) -> Result<String, Error> {
         if !is_safe_string(&self.user) {
             Err(Error::InvalidName { name: self.user.to_string() })
@@ -590,9 +590,9 @@ impl<A> Id for User<A> {
 pub struct GroupBuilder {
     // Group name
     group: String,
-    
+
     gid: Option<usize>,
-    
+
     users: Vec<String>,
 }
 
@@ -670,7 +670,7 @@ impl Group {
                     return Err(Error::InvalidData { data: username.to_string() });
                 }
             }
-            
+
             #[cfg_attr(rustfmt, rustfmt_skip)]
             Ok(format!("{};{};{}\n",
                 self.group,
@@ -1010,7 +1010,7 @@ pub trait All: AllInner {
 pub struct AllUsers<A> {
     users: Vec<User<A>>,
     config: Config,
-    
+
     // Hold on to the locked fds to prevent race conditions
     #[allow(dead_code)]
     passwd_fd: File,
@@ -1019,7 +1019,7 @@ pub struct AllUsers<A> {
 }
 
 impl<A: Default> AllUsers<A> {
-    fn new(config: Config) -> Result<AllUsers<A>, Error> {
+    pub fn new(config: Config) -> Result<AllUsers<A>, Error> {
         let mut passwd_fd = locked_file(config.in_scheme(PASSWD_FILE), Lock::Exclusive)?;
         let mut passwd_cntnt = String::new();
         passwd_fd.read_to_string(&mut passwd_cntnt)?;
@@ -1030,7 +1030,7 @@ impl<A: Default> AllUsers<A> {
             user.auth_delay = config.auth_delay;
             passwd_entries.push(user);
         }
-        
+
         Ok(AllUsers::<A> {
             users: passwd_entries,
             config,
@@ -1057,10 +1057,10 @@ impl AllUsers<auth::Full> {
         let mut shadow_cntnt = String::new();
         shadow_fd.read_to_string(&mut shadow_cntnt)?;
         let shadow_entries: Vec<&str> = shadow_cntnt.lines().collect();
-        
+
         let mut new = Self::new(config)?;
         new.shadow_fd = Some(shadow_fd);
-        
+
         for (indx, entry) in shadow_entries.iter().enumerate() {
             let mut entry = entry.split(';');
             let name = entry.next().ok_or(parse_error(indx,
@@ -1076,11 +1076,11 @@ impl AllUsers<auth::Full> {
                     "error parsing shadowfile: unkown user"
                 ))?.auth.hash = hash.to_string();
         }
-        
+
         shadow_cntnt.zeroize();
         Ok(new)
     }
-    
+
     /// Consumes a builder, adding a new user to this `AllUsers`. Returns a
     /// reference to the created user.
     ///
@@ -1110,12 +1110,12 @@ impl AllUsers<auth::Full> {
         if !is_valid_name(&builder.user) {
             return Err(Error::InvalidName { name: builder.user });
         }
-        
+
         let uid = builder.uid.unwrap_or_else(||
             self.get_unique_id()
                 .expect("no remaining unused user ids")
         );
-        
+
         if self.iter().any(|user| user.user == builder.user || user.uid == uid) {
             Err(Error::UserAlreadyExists)
         } else {
@@ -1214,7 +1214,7 @@ impl<A> Drop for AllUsers<A> {
 pub struct AllGroups {
     groups: Vec<Group>,
     config: Config,
-    
+
     group_fd: File,
 }
 
@@ -1260,7 +1260,7 @@ impl AllGroups {
                 };
                 group.group == builder.group || gid_taken
             });
-        
+
         if group_exists {
             Err(Error::GroupAlreadyExists)
         } else if !is_valid_name(&builder.group) {
@@ -1271,7 +1271,7 @@ impl AllGroups {
                     return Err(Error::InvalidName { name: username.to_string() });
                 }
             }
-            
+
             self.groups.push(Group {
                 group: builder.group,
                 gid: builder.gid.unwrap_or_else(||
@@ -1356,7 +1356,7 @@ mod test {
         valid("hyphen-ated");
         valid("under_scores");
         valid("1334");
-        
+
         invld("-no_flgs");
         invld("invalid!");
         invld("also:invalid");
@@ -1470,7 +1470,7 @@ mod test {
             .name("Foo Bar")
             .home("/home/foob")
             .shell("/bin/zsh");
-        
+
         users
             .add_user(fb)
             .expect("failed to add user 'fbar'");
@@ -1538,10 +1538,10 @@ mod test {
     fn empty_groups() {
         let group_trailing = Group::from_group_entry("nobody;2066; ", 0).unwrap();
         assert_eq!(group_trailing.users.len(), 0);
-        
+
         let group_no_trailing = Group::from_group_entry("nobody;2066;", 0).unwrap();
         assert_eq!(group_no_trailing.users.len(), 0);
-        
+
         assert_eq!(group_trailing.group, group_no_trailing.group);
         assert_eq!(group_trailing.gid, group_no_trailing.gid);
         assert_eq!(group_trailing.users, group_no_trailing.users);
@@ -1566,12 +1566,12 @@ mod test {
     fn manip_group() {
         let id = 7099;
         let mut groups = AllGroups::new(test_cfg()).unwrap();
-        
+
         let fb = GroupBuilder::new("fbar")
             // NOT testing `get_unique_id`
             .gid(id)
             .user("fbar");
-        
+
         groups.add_group(fb).unwrap();
         groups.save().unwrap();
         let file_content = read_locked_file(test_prefix(GROUP_FILE)).unwrap();
@@ -1616,13 +1616,13 @@ mod test {
             )
         );
     }
-    
+
     #[test]
     fn empty_group() {
         let mut groups = AllGroups::new(test_cfg()).unwrap();
         let nobody = GroupBuilder::new("nobody")
             .gid(2260);
-        
+
         groups.add_group(nobody).unwrap();
         groups.save().unwrap();
         let file_content = read_locked_file(test_prefix(GROUP_FILE)).unwrap();
@@ -1636,13 +1636,13 @@ mod test {
                 "nobody;2260;\n",
             )
         );
-        
+
         drop(groups);
         let mut groups = AllGroups::new(test_cfg()).unwrap();
-        
+
         groups.remove_by_name("nobody");
         groups.save().unwrap();
-        
+
         let file_content = read_locked_file(test_prefix(GROUP_FILE)).unwrap();
         assert_eq!(
             file_content,
