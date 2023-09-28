@@ -52,7 +52,7 @@ use zeroize::Zeroize;
 //use nix::fcntl::{flock, FlockArg};
 
 #[cfg(target_os = "redox")]
-use syscall::flag::{O_EXLOCK, O_SHLOCK};
+use libredox::flag::{O_EXLOCK, O_SHLOCK};
 
 const PASSWD_FILE: &'static str = "/etc/passwd";
 const GROUP_FILE: &'static str = "/etc/group";
@@ -113,6 +113,7 @@ pub enum Error {
     #[error("invalid entry element '{data}'")]
     InvalidData { data: String },
 }
+pub type Result<T, E = Error> = core::result::Result<T, E>;
 
 #[inline]
 fn parse_error(line: usize, reason: &str) -> Error {
@@ -122,8 +123,8 @@ fn parse_error(line: usize, reason: &str) -> Error {
     }
 }
 
-impl From<syscall::Error> for Error {
-    fn from(syscall_error: syscall::Error) -> Error {
+impl From<libredox::error::Error> for Error {
+    fn from(syscall_error: libredox::error::Error) -> Error {
         Error::Os { reason: syscall_error.text() }
     }
 }
@@ -718,7 +719,7 @@ impl Id for Group {
 /// let euid = get_euid().unwrap();
 /// ```
 pub fn get_euid() -> Result<usize, Error> {
-    syscall::geteuid()
+    libredox::call::geteuid()
         .map_err(From::from)
 }
 
@@ -736,7 +737,7 @@ pub fn get_euid() -> Result<usize, Error> {
 /// let uid = get_uid().unwrap();
 /// ```
 pub fn get_uid() -> Result<usize, Error> {
-    syscall::getuid()
+    libredox::call::getruid()
         .map_err(From::from)
 }
 
@@ -754,7 +755,7 @@ pub fn get_uid() -> Result<usize, Error> {
 /// let egid = get_egid().unwrap();
 /// ```
 pub fn get_egid() -> Result<usize, Error> {
-    syscall::getegid()
+    libredox::call::getegid()
         .map_err(From::from)
 }
 
@@ -772,7 +773,7 @@ pub fn get_egid() -> Result<usize, Error> {
 /// let gid = get_gid().unwrap();
 /// ```
 pub fn get_gid() -> Result<usize, Error> {
-    syscall::getgid()
+    libredox::call::getrgid()
         .map_err(From::from)
 }
 
