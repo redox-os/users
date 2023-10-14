@@ -12,7 +12,7 @@ edition = "2021"
 
 [dependencies]
 getrandom = { version = "0.2", features = ["std"] }
-libredox = { git = "https://gitlab.redox-os.org/redox-os/libredox.git" }
+libredox = { version = "0.0.1", default-features = false, features = ["call"] }
 rust-argon2 = { version = "0.8", optional = true }
 thiserror = "1.0"
 zeroize = { version = "1.4", features = ["zeroize_derive"], optional = true }
