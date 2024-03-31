@@ -124,7 +124,7 @@ fn parse_error(line: usize, reason: &str) -> Error {
 
 impl From<libredox::error::Error> for Error {
     fn from(syscall_error: libredox::error::Error) -> Error {
-        Error::Os { reason: syscall_error.text() }
+        Error::Io(std::io::Error::from(syscall_error))
     }
 }
 
