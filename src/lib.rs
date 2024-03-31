@@ -1320,7 +1320,7 @@ impl AllGroups {
     pub fn save(&mut self) -> Result<(), Error> {
         let mut groupstring = String::new();
         for group in &self.groups {
-            groupstring.push_str(group.group_entry()?.as_str());
+            groupstring.push_str(&group.group_entry()?);
         }
 
         reset_file(&mut self.group_fd)?;
