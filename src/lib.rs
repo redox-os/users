@@ -265,7 +265,7 @@ pub mod auth {
         pub(crate) fn passwd(pw: &str) -> Result<Full, Error> {
             Ok(if pw != "" {
                 let mut buf = [0u8; 8];
-                getrandom::getrandom(&mut buf)?;
+                getrandom::fill(&mut buf)?;
                 let mut salt = format!("{:X}", u64::from_ne_bytes(buf));
 
                 let config = argon2::Config::default();
