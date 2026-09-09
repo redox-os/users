@@ -210,10 +210,7 @@ pub fn is_valid_name(name: &str) -> bool {
     if name.len() < USERNAME_LEN_MIN || name.len() > USERNAME_LEN_MAX {
         false
     } else if let Some(first) = name.chars().next() {
-        first != '-' &&
-            name.chars().all(|c| {
-                PORTABLE_FILE_NAME_CHARS.contains(c)
-            })
+        first != '-' && name.chars().all(|c| PORTABLE_FILE_NAME_CHARS.contains(c))
     } else {
         false
     }
@@ -269,11 +266,7 @@ pub mod auth {
                 let mut salt = format!("{:X}", u64::from_ne_bytes(buf));
 
                 let config = argon2::Config::default();
-                let hash: String = argon2::hash_encoded(
-                    pw.as_bytes(),
-                    salt.as_bytes(),
-                    &config
-                )?;
+                let hash: String = argon2::hash_encoded(pw.as_bytes(), salt.as_bytes(), &config)?;
 
                 buf.zeroize();
                 salt.zeroize();
@@ -290,8 +283,9 @@ pub mod auth {
                 //TODO: When does this panic? Should this function return
                 // Result? Or does it need to simply fail to verify if
                 // verify_encoded() fails?
-                hash => argon2::verify_encoded(&hash, pw.as_bytes())
-                    .expect("failed to verify hash"),
+                hash => {
+                    argon2::verify_encoded(&hash, pw.as_bytes()).expect("failed to verify hash")
+                }
             }
         }
     }
@@ -299,8 +293,7 @@ pub mod auth {
     #[cfg(feature = "auth")]
     impl fmt::Debug for Full {
         fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-            f.debug_struct("Full")
-                .finish()
+            f.debug_struct("Full").finish()
         }
     }
 }
@@ -424,7 +417,9 @@ pub struct User<A> {
 impl<A: Default> User<A> {
     /// Get a Command to run the user's default shell (see [`User::login_cmd`]
     /// for more docs).
-    pub fn shell_cmd(&self) -> Command { self.login_cmd(&self.shell) }
+    pub fn shell_cmd(&self) -> Command {
+        self.login_cmd(&self.shell)
+    }
 
     /// Provide a login command for the user, which is any entry point for
     /// starting a user's session, whether a shell (use [`User::shell_cmd`]
@@ -440,7 +435,8 @@ impl<A: Default> User<A> {
     ///    - `HOME` set to the user's `home` field.
     ///    - `SHELL` set to the user's `shell` field.
     pub fn login_cmd<T>(&self, cmd: T) -> Command
-        where T: std::convert::AsRef<std::ffi::OsStr> + AsRef<str>
+    where
+        T: std::convert::AsRef<std::ffi::OsStr> + AsRef<str>,
     {
         let mut command = Command::new(cmd);
         command
@@ -458,9 +454,7 @@ impl<A: Default> User<A> {
     fn from_passwd_entry(s: &str, line: usize) -> Result<User<A>, Error> {
         let mut parts = s.split(';');
 
-        let user = parts
-            .next()
-            .ok_or(parse_error(line, "expected user"))?;
+        let user = parts.next().ok_or(parse_error(line, "expected user"))?;
         let uid = parts
             .next()
             .ok_or(parse_error(line, "expected uid"))?
@@ -543,13 +537,21 @@ impl User<auth::Full> {
     /// Format this user as an entry in `/etc/passwd`.
     fn passwd_entry(&self) -> Result<String, Error> {
         if !is_safe_string(&self.user) {
-            Err(Error::InvalidName { name: self.user.to_string() })
+            Err(Error::InvalidName {
+                name: self.user.to_string(),
+            })
         } else if !is_safe_string(&self.name) {
-            Err(Error::InvalidData { data: self.name.to_string() })
+            Err(Error::InvalidData {
+                data: self.name.to_string(),
+            })
         } else if !is_safe_string(&self.home) {
-            Err(Error::InvalidData { data: self.home.to_string() })
+            Err(Error::InvalidData {
+                data: self.home.to_string(),
+            })
         } else if !is_safe_string(&self.shell) {
-            Err(Error::InvalidData { data: self.shell.to_string() })
+            Err(Error::InvalidData {
+                data: self.shell.to_string(),
+            })
         } else {
             #[cfg_attr(rustfmt, rustfmt_skip)]
             Ok(format!("{};{};{};{};{};{}\n",
@@ -560,7 +562,9 @@ impl User<auth::Full> {
 
     fn shadow_entry(&self) -> Result<String, Error> {
         if !is_safe_string(&self.user) {
-            Err(Error::InvalidName { name: self.user.to_string() })
+            Err(Error::InvalidName {
+                name: self.user.to_string(),
+            })
         } else {
             Ok(format!("{};{}\n", self.user, self.auth.hash))
         }
@@ -642,27 +646,18 @@ pub struct Group {
 
 impl Group {
     fn from_group_entry(s: &str, line: usize) -> Result<Group, Error> {
-        let mut parts = s.trim()
-            .split(';');
+        let mut parts = s.trim().split(';');
 
-        let group = parts
-            .next()
-            .ok_or(parse_error(line, "expected group"))?;
-        let password = parts
-            .next()
-            .ok_or(parse_error(line, "expected password"))?;
+        let group = parts.next().ok_or(parse_error(line, "expected group"))?;
+        let password = parts.next().ok_or(parse_error(line, "expected password"))?;
         let gid = parts
             .next()
             .ok_or(parse_error(line, "expected gid"))?
             .parse::<usize>()?;
-        let users_str = parts.next()
-            .unwrap_or("");
-        let users = users_str.split(',')
-            .filter_map(|u| if u == "" {
-                None
-            } else {
-                Some(u.into())
-            })
+        let users_str = parts.next().unwrap_or("");
+        let users = users_str
+            .split(',')
+            .filter_map(|u| if u == "" { None } else { Some(u.into()) })
             .collect();
 
         Ok(Group {
@@ -675,11 +670,15 @@ impl Group {
 
     fn group_entry(&self) -> Result<String, Error> {
         if !is_safe_string(&self.group) {
-            Err(Error::InvalidName { name: self.group.to_string() })
+            Err(Error::InvalidName {
+                name: self.group.to_string(),
+            })
         } else {
             for username in self.users.iter() {
                 if !is_safe_string(&username) {
-                    return Err(Error::InvalidData { data: username.to_string() });
+                    return Err(Error::InvalidData {
+                        data: username.to_string(),
+                    });
                 }
             }
 
@@ -720,8 +719,7 @@ impl Id for Group {
 /// let euid = get_euid().unwrap();
 /// ```
 pub fn get_euid() -> Result<usize, Error> {
-    libredox::call::geteuid()
-        .map_err(From::from)
+    libredox::call::geteuid().map_err(From::from)
 }
 
 /// Gets the current process real user ID.
@@ -738,8 +736,7 @@ pub fn get_euid() -> Result<usize, Error> {
 /// let uid = get_uid().unwrap();
 /// ```
 pub fn get_uid() -> Result<usize, Error> {
-    libredox::call::getruid()
-        .map_err(From::from)
+    libredox::call::getruid().map_err(From::from)
 }
 
 /// Gets the current process effective group ID.
@@ -756,8 +753,7 @@ pub fn get_uid() -> Result<usize, Error> {
 /// let egid = get_egid().unwrap();
 /// ```
 pub fn get_egid() -> Result<usize, Error> {
-    libredox::call::getegid()
-        .map_err(From::from)
+    libredox::call::getegid().map_err(From::from)
 }
 
 /// Gets the current process real group ID.
@@ -774,8 +770,7 @@ pub fn get_egid() -> Result<usize, Error> {
 /// let gid = get_gid().unwrap();
 /// ```
 pub fn get_gid() -> Result<usize, Error> {
-    libredox::call::getrgid()
-        .map_err(From::from)
+    libredox::call::getrgid().map_err(From::from)
 }
 
 /// A generic configuration that allows fine control of an [`AllUsers`] or
@@ -931,14 +926,16 @@ pub trait All: AllInner {
     /// let user = users.get_by_name("root").unwrap();
     /// ```
     fn get_by_name(&self, name: impl AsRef<str>) -> Option<&<Self as AllInner>::Gruser> {
-        self.iter()
-            .find(|gruser| gruser.name() == name.as_ref() )
+        self.iter().find(|gruser| gruser.name() == name.as_ref())
     }
 
     /// Mutable version of [`All::get_by_name`].
-    fn get_mut_by_name(&mut self, name: impl AsRef<str>) -> Option<&mut <Self as AllInner>::Gruser> {
+    fn get_mut_by_name(
+        &mut self,
+        name: impl AsRef<str>,
+    ) -> Option<&mut <Self as AllInner>::Gruser> {
         self.iter_mut()
-            .find(|gruser| gruser.name() == name.as_ref() )
+            .find(|gruser| gruser.name() == name.as_ref())
     }
 
     /// Borrow the [`User`] or [`Group`] with the given ID.
@@ -953,14 +950,12 @@ pub trait All: AllInner {
     /// let user = users.get_by_id(0).unwrap();
     /// ```
     fn get_by_id(&self, id: usize) -> Option<&<Self as AllInner>::Gruser> {
-        self.iter()
-            .find(|gruser| gruser.id() == id )
+        self.iter().find(|gruser| gruser.id() == id)
     }
 
     /// Mutable version of [`All::get_by_id`].
     fn get_mut_by_id(&mut self, id: usize) -> Option<&mut <Self as AllInner>::Gruser> {
-        self.iter_mut()
-            .find(|gruser| gruser.id() == id )
+        self.iter_mut().find(|gruser| gruser.id() == id)
     }
 
     /// Provides an unused id based on the min and max values in the [`Config`]
@@ -975,8 +970,8 @@ pub trait All: AllInner {
     /// ```
     fn get_unique_id(&self) -> Option<usize> {
         for id in self.config().min_id..self.config().max_id {
-            if !self.iter().any(|gruser| gruser.id() == id ) {
-                return Some(id)
+            if !self.iter().any(|gruser| gruser.id() == id) {
+                return Some(id);
             }
         }
         None
@@ -987,13 +982,13 @@ pub trait All: AllInner {
     /// that the Gruser no longer exists.
     fn remove_by_name(&mut self, name: impl AsRef<str>) -> bool {
         let list = self.list_mut();
-        let indx = list.iter()
-            .enumerate()
-            .find_map(|(indx, gruser)| if gruser.name() == name.as_ref() {
-                    Some(indx)
-                } else {
-                    None
-                });
+        let indx = list.iter().enumerate().find_map(|(indx, gruser)| {
+            if gruser.name() == name.as_ref() {
+                Some(indx)
+            } else {
+                None
+            }
+        });
         if let Some(indx) = indx {
             list.remove(indx);
             true
@@ -1005,13 +1000,10 @@ pub trait All: AllInner {
     /// Id version of [`All::remove_by_name`].
     fn remove_by_id(&mut self, id: usize) -> bool {
         let list = self.list_mut();
-        let indx = list.iter()
-            .enumerate()
-            .find_map(|(indx, gruser)| if gruser.id() == id {
-                    Some(indx)
-                } else {
-                    None
-                });
+        let indx =
+            list.iter()
+                .enumerate()
+                .find_map(|(indx, gruser)| if gruser.id() == id { Some(indx) } else { None });
         if let Some(indx) = indx {
             list.remove(indx);
             true
@@ -1089,18 +1081,19 @@ impl AllUsers<auth::Full> {
 
         for (indx, entry) in shadow_entries.iter().enumerate() {
             let mut entry = entry.split(';');
-            let name = entry.next().ok_or(parse_error(indx,
-                "error parsing shadowfile: expected username"
+            let name = entry.next().ok_or(parse_error(
+                indx,
+                "error parsing shadowfile: expected username",
             ))?;
-            let hash = entry.next().ok_or(parse_error(indx,
-                "error parsing shadowfile: expected hash"
-            ))?;
+            let hash = entry
+                .next()
+                .ok_or(parse_error(indx, "error parsing shadowfile: expected hash"))?;
             new.users
                 .iter_mut()
                 .find(|user| user.user == name)
-                .ok_or(parse_error(indx,
-                    "error parsing shadowfile: unkown user"
-                ))?.auth.hash = hash.to_string();
+                .ok_or(parse_error(indx, "error parsing shadowfile: unkown user"))?
+                .auth
+                .hash = hash.to_string();
         }
 
         shadow_cntnt.zeroize();
@@ -1137,12 +1130,14 @@ impl AllUsers<auth::Full> {
             return Err(Error::InvalidName { name: builder.user });
         }
 
-        let uid = builder.uid.unwrap_or_else(||
-            self.get_unique_id()
-                .expect("no remaining unused user ids")
-        );
+        let uid = builder
+            .uid
+            .unwrap_or_else(|| self.get_unique_id().expect("no remaining unused user ids"));
 
-        if self.iter().any(|user| user.user == builder.user || user.uid == uid) {
+        if self
+            .iter()
+            .any(|user| user.user == builder.user || user.uid == uid)
+        {
             Err(Error::UserAlreadyExists)
         } else {
             self.users.push(User {
@@ -1153,7 +1148,7 @@ impl AllUsers<auth::Full> {
                 home: builder.home.unwrap_or("/".to_string()),
                 shell: builder.shell.unwrap_or("file:/bin/ion".to_string()),
                 auth: auth::Full::unset(),
-                auth_delay: self.config.auth_delay
+                auth_delay: self.config.auth_delay,
             });
             Ok(&self.users[self.users.len() - 1])
         }
@@ -1172,11 +1167,15 @@ impl AllUsers<auth::Full> {
         // 2 accounts for the semicolon separator and newline
         let acfg = argon2::Config::default();
         let argon_len = argon2::encoded_len(
-            acfg.variant, acfg.mem_cost, acfg.time_cost,
-            1, 16, acfg.hash_length) as usize;
-        let mut shadowstring = String::with_capacity(
-            self.users.len() * (USERNAME_LEN_MAX + argon_len + 2)
-        );
+            acfg.variant,
+            acfg.mem_cost,
+            acfg.time_cost,
+            1,
+            16,
+            acfg.hash_length,
+        ) as usize;
+        let mut shadowstring =
+            String::with_capacity(self.users.len() * (USERNAME_LEN_MAX + argon_len + 2));
 
         for user in &self.users {
             userstring.push_str(&user.passwd_entry()?);
@@ -1187,7 +1186,9 @@ impl AllUsers<auth::Full> {
             shadow_entry.zeroize();
         }
 
-        let mut shadow_fd = self.shadow_fd.as_mut()
+        let mut shadow_fd = self
+            .shadow_fd
+            .as_mut()
             .expect("shadow_fd should exist for AllUsers<auth::Full>");
 
         reset_file(&mut self.passwd_fd)?;
@@ -1277,34 +1278,36 @@ impl AllGroups {
     /// If the builder is not passed any users ([`GroupBuilder::user`]), the
     /// group will still be created.
     pub fn add_group(&mut self, builder: GroupBuilder) -> Result<&Group, Error> {
-        let group_exists = self.iter()
-            .any(|group| {
-                let gid_taken = if let Some(gid) = builder.gid {
-                    group.gid == gid
-                } else {
-                    false
-                };
-                group.group == builder.group || gid_taken
-            });
+        let group_exists = self.iter().any(|group| {
+            let gid_taken = if let Some(gid) = builder.gid {
+                group.gid == gid
+            } else {
+                false
+            };
+            group.group == builder.group || gid_taken
+        });
 
         if group_exists {
             Err(Error::GroupAlreadyExists)
         } else if !is_valid_name(&builder.group) {
-            Err(Error::InvalidName { name: builder.group })
+            Err(Error::InvalidName {
+                name: builder.group,
+            })
         } else {
             for username in builder.users.iter() {
                 if !is_valid_name(username) {
-                    return Err(Error::InvalidName { name: username.to_string() });
+                    return Err(Error::InvalidName {
+                        name: username.to_string(),
+                    });
                 }
             }
 
             self.groups.push(Group {
                 group: builder.group,
                 password: "x".into(),
-                gid: builder.gid.unwrap_or_else(||
-                    self.get_unique_id()
-                        .expect("no remaining unused group IDs")
-                ),
+                gid: builder.gid.unwrap_or_else(|| {
+                    self.get_unique_id().expect("no remaining unused group IDs")
+                }),
                 users: builder.users,
             });
             Ok(&self.groups[self.groups.len() - 1])
@@ -1450,8 +1453,10 @@ mod test {
 
         let root = users.get_by_id(0).expect("'root' user missing");
         assert_eq!(root.user, "root".to_string());
-        assert_eq!(root.auth.hash.as_str(),
-            "$argon2i$m=4096,t=10,p=1$Tnc4UVV0N00$ML9LIOujd3nmAfkAwEcSTMPqakWUF0OUiLWrIy0nGLk");
+        assert_eq!(
+            root.auth.hash.as_str(),
+            "$argon2i$m=4096,t=10,p=1$Tnc4UVV0N00$ML9LIOujd3nmAfkAwEcSTMPqakWUF0OUiLWrIy0nGLk"
+        );
         assert_eq!(root.uid, 0);
         assert_eq!(root.gid, 0);
         assert_eq!(root.name, "root".to_string());
@@ -1493,9 +1498,7 @@ mod test {
             .home("/home/foob")
             .shell("/bin/zsh");
 
-        users
-            .add_user(fb)
-            .expect("failed to add user 'fbar'");
+        users.add_user(fb).expect("failed to add user 'fbar'");
         //                                            weirdo ^^^^^^^^ :P
         users.save().unwrap();
         let p_file_content = read_locked_file(test_prefix(PASSWD_FILE)).unwrap();
@@ -1518,8 +1521,7 @@ mod test {
 
         {
             println!("{:?}", users);
-            let fb = users.get_mut_by_name("fbar")
-                .expect("'fbar' user missing");
+            let fb = users.get_mut_by_name("fbar").expect("'fbar' user missing");
             fb.shell = "/bin/fish".to_string(); // That's better
             fb.set_passwd("").unwrap();
         }
@@ -1642,8 +1644,7 @@ mod test {
     #[test]
     fn empty_group() {
         let mut groups = AllGroups::new(test_cfg()).unwrap();
-        let nobody = GroupBuilder::new("nobody")
-            .gid(2260);
+        let nobody = GroupBuilder::new("nobody").gid(2260);
 
         groups.add_group(nobody).unwrap();
         groups.save().unwrap();
