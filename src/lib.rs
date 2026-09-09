@@ -193,6 +193,19 @@ fn is_safe_string(s: &str) -> bool {
     !s.contains(';')
 }
 
+/// Split a line into columns by either ';' or ':'.
+///
+/// Redox OS currently uses ';' as passwd delimiter, but it is possible that
+/// it will change into more portable ':'. When that happen, the path
+/// stored cannot be a legacy path anymore (i.e. stored as /scheme/file).
+fn split_columns(s: &str) -> std::str::Split<'_, char> {
+    if s.contains(';') {
+        s.split(';')
+    } else {
+        s.split(':')
+    }
+}
+
 const PORTABLE_FILE_NAME_CHARS: &str =
     "0123456789._-abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
 
@@ -449,7 +462,7 @@ impl<A: Default> User<A> {
     }
 
     fn from_passwd_entry(s: &str, line: usize) -> Result<User<A>, Error> {
-        let mut parts = s.split(';');
+        let mut parts = split_columns(s);
 
         let user = parts.next().ok_or(parse_error(line, "expected user"))?;
         let uid = parts
@@ -643,7 +656,7 @@ pub struct Group {
 
 impl Group {
     fn from_group_entry(s: &str, line: usize) -> Result<Group, Error> {
-        let mut parts = s.trim().split(';');
+        let mut parts = split_columns(s.trim());
 
         let group = parts.next().ok_or(parse_error(line, "expected group"))?;
         let password = parts.next().ok_or(parse_error(line, "expected password"))?;
@@ -1077,7 +1090,7 @@ impl AllUsers<auth::Full> {
         new.shadow_fd = Some(shadow_fd);
 
         for (indx, entry) in shadow_entries.iter().enumerate() {
-            let mut entry = entry.split(';');
+            let mut entry = split_columns(entry);
             let name = entry.next().ok_or(parse_error(
                 indx,
                 "error parsing shadowfile: expected username",
