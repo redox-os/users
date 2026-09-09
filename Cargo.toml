@@ -11,7 +11,7 @@ keywords = ["redox", "auth"]
 edition = "2021"
 
 [dependencies]
-getrandom = { version = "0.2", features = ["std"] }
+getrandom = { version = "0.4", features = ["std"] }
 libredox = { version = "0.1.3", default-features = false, features = ["std", "call"] }
 rust-argon2 = { version = "0.8", optional = true }
 thiserror = "2.0"
