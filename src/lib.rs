@@ -169,7 +169,6 @@ fn locked_file(file: impl AsRef<Path>, lock: Lock) -> Result<File, Error> {
             .open(file)?)
     }
     #[cfg(not(target_os = "redox"))]
-    #[cfg_attr(rustfmt, rustfmt_skip)]
     {
         let file = OpenOptions::new()
             .read(true)
@@ -553,8 +552,8 @@ impl User<auth::Full> {
                 data: self.shell.to_string(),
             })
         } else {
-            #[cfg_attr(rustfmt, rustfmt_skip)]
-            Ok(format!("{};{};{};{};{};{}\n",
+            Ok(format!(
+                "{};{};{};{};{};{}\n",
                 self.user, self.uid, self.gid, self.name, self.home, self.shell
             ))
         }
@@ -682,8 +681,8 @@ impl Group {
                 }
             }
 
-            #[cfg_attr(rustfmt, rustfmt_skip)]
-            Ok(format!("{};{};{};{}\n",
+            Ok(format!(
+                "{};{};{};{}\n",
                 self.group,
                 self.password,
                 self.gid,
