@@ -53,10 +53,10 @@ use zeroize::Zeroize;
 #[cfg(target_os = "redox")]
 use libredox::flag::{O_EXLOCK, O_SHLOCK};
 
-const PASSWD_FILE: &'static str = "/etc/passwd";
-const GROUP_FILE: &'static str = "/etc/group";
+const PASSWD_FILE: &str = "/etc/passwd";
+const GROUP_FILE: &str = "/etc/group";
 #[cfg(feature = "auth")]
-const SHADOW_FILE: &'static str = "/etc/shadow";
+const SHADOW_FILE: &str = "/etc/shadow";
 
 const MIN_ID: usize = 1000;
 const MAX_ID: usize = 6000;
@@ -247,7 +247,7 @@ pub mod auth {
         }
 
         pub(crate) fn is_empty(&self) -> bool {
-            &self.hash == ""
+            self.hash.is_empty()
         }
 
         pub(crate) fn unset() -> Full {
@@ -259,7 +259,7 @@ pub mod auth {
         }
 
         pub(crate) fn passwd(pw: &str) -> Result<Full, Error> {
-            Ok(if pw != "" {
+            Ok(if !pw.is_empty() {
                 let mut buf = [0u8; 8];
                 getrandom::fill(&mut buf)?;
                 let mut salt = format!("{:X}", u64::from_ne_bytes(buf));
@@ -277,14 +277,12 @@ pub mod auth {
 
         pub(crate) fn verify(&self, pw: &str) -> bool {
             match self.hash.as_str() {
-                "" => pw == "",
+                "" => pw.is_empty(),
                 "!" => false,
                 //TODO: When does this panic? Should this function return
                 // Result? Or does it need to simply fail to verify if
                 // verify_encoded() fails?
-                hash => {
-                    argon2::verify_encoded(&hash, pw.as_bytes()).expect("failed to verify hash")
-                }
+                hash => argon2::verify_encoded(hash, pw.as_bytes()).expect("failed to verify hash"),
             }
         }
     }
@@ -656,7 +654,7 @@ impl Group {
         let users_str = parts.next().unwrap_or("");
         let users = users_str
             .split(',')
-            .filter_map(|u| if u == "" { None } else { Some(u.into()) })
+            .filter_map(|u| if u.is_empty() { None } else { Some(u.into()) })
             .collect();
 
         Ok(Group {
@@ -674,7 +672,7 @@ impl Group {
             })
         } else {
             for username in self.users.iter() {
-                if !is_safe_string(&username) {
+                if !is_safe_string(username) {
                     return Err(Error::InvalidData {
                         data: username.to_string(),
                     });
@@ -845,7 +843,7 @@ impl Config {
         // Should be a little careful here, not sure I want this behavior
         if path.as_ref().is_absolute() {
             // This is nasty
-            canonical_path.push(path.as_ref().to_string_lossy()[1..].to_string());
+            canonical_path.push(&path.as_ref().to_string_lossy()[1..]);
         } else {
             canonical_path.push(path);
         }
@@ -1185,7 +1183,7 @@ impl AllUsers<auth::Full> {
             shadow_entry.zeroize();
         }
 
-        let mut shadow_fd = self
+        let shadow_fd = self
             .shadow_fd
             .as_mut()
             .expect("shadow_fd should exist for AllUsers<auth::Full>");
@@ -1193,7 +1191,7 @@ impl AllUsers<auth::Full> {
         reset_file(&mut self.passwd_fd)?;
         self.passwd_fd.write_all(userstring.as_bytes())?;
 
-        reset_file(&mut shadow_fd)?;
+        reset_file(shadow_fd)?;
         shadow_fd.write_all(shadowstring.as_bytes())?;
 
         shadowstring.zeroize();
