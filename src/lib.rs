@@ -909,13 +909,13 @@ use sealed::{AllInner, Id, Name};
 /// at the trait level. Do not try to implement this trait.
 pub trait All: AllInner {
     /// Get an iterator borrowing all [`User`]s or [`Group`]s on the system.
-    fn iter(&self) -> Iter<<Self as AllInner>::Gruser> {
+    fn iter(&self) -> Iter<'_, <Self as AllInner>::Gruser> {
         self.list().iter()
     }
 
     /// Get an iterator mutably borrowing all [`User`]s or [`Group`]s on the
     /// system.
-    fn iter_mut(&mut self) -> IterMut<<Self as AllInner>::Gruser> {
+    fn iter_mut(&mut self) -> IterMut<'_, <Self as AllInner>::Gruser> {
         self.list_mut().iter_mut()
     }
 
