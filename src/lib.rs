@@ -76,6 +76,7 @@ pub enum Error {
     Io(#[from] std::io::Error),
 
     #[error("failed to generate seed: {0}")]
+    #[cfg(feature = "auth")]
     Getrandom(#[from] getrandom::Error),
 
     #[cfg(feature = "auth")]
@@ -271,6 +272,7 @@ pub mod auth {
             &self.hash == "!"
         }
 
+        #[cfg(feature = "auth")]
         pub(crate) fn passwd(pw: &str) -> Result<Full, Error> {
             Ok(if !pw.is_empty() {
                 let mut buf = [0u8; 8];
